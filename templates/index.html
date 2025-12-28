@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Junos ACL Analyzer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .stats-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .memory-usage {
+            background: #e3f2fd;
+            border-left-color: #2196F3;
+        }
+        .goroutines {
+            background: #f3e5f5;
+            border-left-color: #9C27B0;
+        }
+        .uptime {
+            background: #e8f5e9;
+            border-left-color: #4CAF50;
+        }
+        .search-box {
+            margin: 30px 0;
+            display: flex;
+            gap: 10px;
+        }
+        .search-input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .search-btn {
+            padding: 12px 24px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .search-btn:hover {
+            background-color: #45a049;
+        }
+        .truth-btn {
+            padding: 12px 24px;
+            background-color: #ff9800;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            white-space: nowrap;
+        }
+        .truth-btn:hover {
+            background-color: #f57c00;
+        }
+        .example {
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .rules-summary {
+            margin-top: 30px;
+        }
+        .rule-item {
+            background: #f9f9f9;
+            margin: 10px 0;
+            padding: 15px;
+            border-left: 4px solid #4CAF50;
+            border-radius: 3px;
+        }
+        .rule-header {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .rule-details {
+            font-size: 14px;
+            color: #666;
+        }
+        .tag {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            margin-right: 5px;
+        }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #888;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Junos ACL Analyzer</h1>
+        
+        <div class="stats-container">
+            <div class="stat-card">
+                <div class="stat-value">{{.Stats.PrefixListCount}}</div>
+                <div class="stat-label">Prefix lists</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value">{{.Stats.RuleCount}}</div>
+                <div class="stat-label">ACL rules</div>
+            </div>
+            <!--
+            <div class="stat-card memory-usage">
+                <div class="stat-value">{{.Stats.MemoryUsage}}</div>
+                <div class="stat-label">Memory Usage</div>
+            </div>
+            
+            <div class="stat-card goroutines">
+                <div class="stat-value">{{.Stats.Goroutines}}</div>
+                <div class="stat-label">Goroutines</div>
+            </div>
+            
+            <div class="stat-card uptime">
+                <div class="stat-value">{{.Stats.Uptime}}</div>
+                <div class="stat-label">Uptime</div>
+            </div>
+            -->
+        </div>
+        
+        <div class="search-box">
+            <form action="/search" method="get" style="flex: 1; display: flex; gap: 10px;">
+                <input type="text" 
+                       class="search-input"
+                       name="q" 
+                       placeholder="Enter IP address, network prefix, or prefix list name (e.g., 10.237.241.0/24, OPR-WEB-INTERNAL)">
+                <button type="submit" class="search-btn">Search</button>
+            </form>
+            <a href="/check" class="truth-btn">🤝 Брат, скажи правду</a>
+        </div>
+        
+        <div class="example">
+            <strong>Examples for searching:</strong>
+            <ul>
+                <li><code>10.237.241.14/32</code> - specific IP address</li>
+                <li><code>192.168.244.178</code> - specific IP address</li>
+                <li><code>OPR-WEB-INTERNAL</code> - prefix list name</li>
+                <li><code>10.237.241.0/24</code> - network</li>
+            </ul>
+        </div>
+        
+        {{if .SampleRules}}
+        <div class="rules-summary">
+            <h3>Examples of rules in the system:</h3>
+            {{range .SampleRules}}
+            <div class="rule-item">
+                <div class="rule-header">Filter: {{.FilterName}} | Term: {{.Term.Name}}</div>
+                <div class="rule-details">
+                    {{if .ResolvedSourcePrefixes}}
+                    <div>Sources: {{range .ResolvedSourcePrefixes}}<span class="tag">{{.}}</span>{{end}}</div>
+                    {{end}}
+                    {{if .ResolvedDestinationPrefixes}}
+                    <div>Destinations: {{range .ResolvedDestinationPrefixes}}<span class="tag">{{.}}</span>{{end}}</div>
+                    {{end}}
+                    {{if .Term.DestinationPorts}}
+                    <div>Ports: {{range .Term.DestinationPorts}}<span class="tag">{{.}}</span>{{end}}</div>
+                    {{end}}
+                    <div>Action: <span class="tag">{{.Term.Action}}</span></div>
+                </div>
+            </div>
+            {{end}}
+        </div>
+        {{end}}
+        
+        <div class="footer">
+            Go Memory: {{.Stats.MemoryUsage}} | Uptime: {{.Stats.Uptime}} | Goroutines: {{.Stats.Goroutines}}
+        </div>
+    </div>
+</body>
+</html>

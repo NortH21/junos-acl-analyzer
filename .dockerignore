@@ -1,0 +1,32 @@
+# Игнорируемые файлы для Docker
+.git
+.gitignore
+.vscode
+.idea
+*.log
+*.swp
+*.swo
+
+# Go файлы
+bin/
+pkg/
+vendor/
+coverage.out
+*.test
+*.prof
+
+# Документация
+docs/
+*.md
+
+# Временные файлы
+.DS_Store
+Thumbs.db
+
+# Конфиги
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+

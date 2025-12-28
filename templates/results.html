@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search results - Junos ACL Analyzer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .search-box {
+            margin: 30px 0;
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 24px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .back-btn {
+            padding: 12px 24px;
+            background-color: #607d8b;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
+            transition: background-color 0.3s;
+        }
+        .back-btn:hover {
+            background-color: #455a64;
+            color: white;
+            text-decoration: none;
+        }
+        .results-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #e8f5e9;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            font-size: 14px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            min-width: 120px;
+        }
+        .meta-value {
+            font-weight: bold;
+            color: #333;
+            font-size: 16px;
+        }
+        .meta-label {
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .rule-card {
+            background: #f9f9f9;
+            margin: 20px 0;
+            padding: 25px;
+            border-left: 6px solid #2196F3;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        .rule-name {
+            font-weight: bold;
+            color: #333;
+            font-size: 20px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #eee;
+        }
+        .rule-section {
+            margin: 15px 0;
+        }
+        .section-title {
+            font-weight: bold;
+            color: #555;
+            margin-bottom: 8px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .tag {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 6px 12px;
+            border-radius: 4px;
+            margin: 3px 5px;
+            font-size: 13px;
+            font-family: 'Courier New', monospace;
+        }
+        .tag-source {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .tag-destination {
+            background: #f3e5f5;
+            color: #7b1fa2;
+        }
+        .tag-port {
+            background: #fff3e0;
+            color: #ef6c00;
+        }
+        .tag-protocol {
+            background: #fce4ec;
+            color: #c2185b;
+        }
+        .action-accept {
+            color: #4CAF50;
+            font-weight: bold;
+            font-size: 16px;
+            padding: 5px 15px;
+            background: #e8f5e9;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .action-reject {
+            color: #f44336;
+            font-weight: bold;
+            font-size: 16px;
+            padding: 5px 15px;
+            background: #ffebee;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 30px;
+            color: #2196F3;
+            text-decoration: none;
+            font-size: 16px;
+            font-weight: bold;
+            padding: 10px 20px;
+            border: 2px solid #2196F3;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+        .back-link:hover {
+            background: #2196F3;
+            color: white;
+        }
+        .no-results {
+            text-align: center;
+            padding: 60px 40px;
+            color: #666;
+            font-size: 18px;
+            background: #f9f9f9;
+            border-radius: 10px;
+            margin: 30px 0;
+        }
+        .rule-counter {
+            float: right;
+            background: #ff9800;
+            color: white;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .prefix-list-name {
+            background: #9c27b0;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Search results - Junos ACL Analyzer</h1>
+        
+        <div class="search-box">
+            <form action="/search" method="get">
+                <input type="text" 
+                       name="q" 
+                       value="{{.Query}}"
+                       placeholder="Enter IP, prefix, port or prefix list name...">
+                <button type="submit">🔍 Search</button>
+                <a href="/" class="back-btn">← Back</a>
+            </form>
+        </div>
+        
+        <div class="results-meta">
+            <div class="meta-item">
+                <span class="meta-label">Query:</span>
+                <span class="meta-value">{{.Query}}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Rules found:</span>
+                <span class="meta-value">{{len .MatchedRules}}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Go Memory:</span>
+                <span class="meta-value">{{.MemoryUsage}}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Search Time:</span>
+                <span class="meta-value">{{.SearchTime}}</span>
+            </div>
+        </div>
+        
+        {{if .MatchedRules}}
+            {{range $index, $rule := .MatchedRules}}
+            <div class="rule-card">
+                <div class="rule-name">
+                    {{$rule.FilterName}} → {{$rule.Term.Name}}
+                    <span class="rule-counter">#{{add $index 1}}</span>
+                </div>
+                
+                {{if $rule.ResolvedSourcePrefixes}}
+                <div class="rule-section">
+                    <div class="section-title">Source:</div>
+                    {{range $rule.ResolvedSourcePrefixes}}
+                        <span class="tag tag-source">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
+                {{if $rule.Term.SourcePrefixLists}}
+                <div class="rule-section">
+                    <div class="section-title">Source prefix-lists:</div>
+                    {{range $rule.Term.SourcePrefixLists}}
+                        <span class="tag prefix-list-name">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                
+                {{if $rule.ResolvedDestinationPrefixes}}
+                <div class="rule-section">
+                    <div class="section-title">Destination:</div>
+                    {{range $rule.ResolvedDestinationPrefixes}}
+                        <span class="tag tag-destination">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
+                {{if $rule.Term.DestinationPrefixLists}}
+                <div class="rule-section">
+                    <div class="section-title">Destination prefix-lists:</div>
+                    {{range $rule.Term.DestinationPrefixLists}}
+                        <span class="tag prefix-list-name">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                
+                {{if $rule.Term.SourcePorts}}
+                <div class="rule-section">
+                    <div class="section-title">Source ports:</div>
+                    {{range $rule.Term.SourcePorts}}
+                        <span class="tag tag-port">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                
+                {{if $rule.Term.DestinationPorts}}
+                <div class="rule-section">
+                    <div class="section-title">Destination ports:</div>
+                    {{range $rule.Term.DestinationPorts}}
+                        <span class="tag tag-port">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                
+                {{if $rule.Term.Protocol}}
+                <div class="rule-section">
+                    <div class="section-title">Protocol:</div>
+                    <span class="tag tag-protocol">{{$rule.Term.Protocol}}</span>
+                </div>
+                {{end}}
+                
+                <div class="rule-section">
+                    <div class="section-title">Action:</div>
+                    {{if eq $rule.Term.Action "accept"}}
+                        <span class="action-accept">✓ Accept</span>
+                    {{else}}
+                        <span class="action-reject">✗ Reject</span>
+                    {{end}}
+                </div>
+                <!--
+                {{if $rule.Term.Counter}}
+                <div class="rule-section">
+                    <div class="section-title">Traffic counter:</div>
+                    <span class="tag">{{$rule.Term.Counter}}</span>
+                </div>
+                {{end}}
+                -->
+            </div>
+            {{end}}
+        {{else}}
+            <div class="no-results">
+                <h2>🧐 Nothing found</h2>
+                <p>For query <strong>"{{.Query}}"</strong> no rules were found.</p>
+                <p>Try:</p>
+                <ul style="text-align: left; display: inline-block;">
+                    <li>IP address: <code>10.237.241.14</code></li>
+                    <li>Network: <code>10.237.241.0/24</code></li>
+                    <li>Prefix list: <code>OPR-WEB-INTERNAL</code></li>
+                </ul>
+            </div>
+        {{end}}
+        
+        <div style="text-align: center; margin-top: 40px;">
+            <a href="/" class="back-link">← Back to main page</a>
+        </div>
+    </div>
+</body>
+</html>
+
