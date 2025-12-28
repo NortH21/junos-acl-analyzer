@@ -1,0 +1,42 @@
+# Binaries
+bin/
+dist/
+
+# Test and coverage outputs
+*.test
+*.prof
+*.out
+coverage.html
+coverage.txt
+profile.out
+coverage/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
