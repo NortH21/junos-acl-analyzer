@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /app/junos-acl-analyzer \
     ./main.go
 
-FROM alpine:3.18
+FROM alpine:3.23
 
 ENV TZ=Europe/Moscow
 
