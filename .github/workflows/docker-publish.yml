@@ -7,8 +7,9 @@ on:
     paths:
       - '*.go'
       - 'Dockerfile'
-  release:
-    types: [created]
+  create:
+    tags:
+      - 'v*'
 
 env:
   IMAGE: north21/junos-acl-analyzer
