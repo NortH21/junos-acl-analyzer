@@ -666,10 +666,10 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
             Uptime:          getUptime(),
         },
     }
-    
-    // Берем первые 3 правила для примера
+
+    // Берем последние 3 правила для примера
     if len(appState.PolicyRules) > 3 {
-        data.SampleRules = appState.PolicyRules[:3]
+        data.SampleRules = appState.PolicyRules[len(appState.PolicyRules)-3:]
     } else {
         data.SampleRules = appState.PolicyRules
     }
