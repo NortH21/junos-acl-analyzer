@@ -112,14 +112,10 @@ func main() {
     // Разворачивание префикс-листов
     resolvePrefixLists()
 
-    // Выводим отладочную информацию
-    //debugData()
-
     // Настройка HTTP-обработчиков
     http.HandleFunc("/", homeHandler)
     http.HandleFunc("/search", searchHandler)
     http.HandleFunc("/check", checkHandler)
-    http.HandleFunc("/api/search", apiSearchHandler) // TODO: Реализовать
     http.HandleFunc("/api/memory", apiMemoryHandler)
 
     log.Printf("✅ Server started on http://localhost:8080") // TODO: Вынести адрес и порт в конфиг
@@ -131,7 +127,7 @@ func main() {
     }
 }
 
-// searchRulesWithGrouping ищет правила и группирует их
+// Ищет правила и группирует их
 func searchRulesWithGrouping(query string) []GroupedRule {
     groupedRules := make(map[string]*GroupedRule)
     
@@ -190,7 +186,7 @@ func searchRulesWithGrouping(query string) []GroupedRule {
     return result
 }
 
-// isSearchMatch проверяет совпадает ли правило с поисковым запросом
+// Проверяет совпадает ли правило с поисковым запросом
 func isSearchMatch(rule PolicyRule, query string) bool {
     query = strings.ToLower(strings.TrimSpace(query))
     
@@ -221,7 +217,7 @@ func isSearchMatch(rule PolicyRule, query string) bool {
         }
     }
     
-    // Проверяем по имени term (опционально)
+    // Проверяем по имени term
     if strings.Contains(strings.ToLower(rule.Term.Name), query) {
         return true
     }
@@ -646,89 +642,6 @@ func matchesCIDR(query, cidr string) bool {
     return false
 }
 
-// Ищет правила по IP/префиксу
-func searchRules(query string) []PolicyRule {
-    var results []PolicyRule
-    
-    query = strings.TrimSpace(query)
-    
-    for _, rule := range appState.PolicyRules {
-        matched := false
-        
-        // Проверяем source адреса
-        for _, source := range rule.ResolvedSourcePrefixes {
-            if matchesCIDR(query, source) || strings.Contains(source, query) {
-                matched = true
-                break
-            }
-        }
-        
-        // Проверяем destination адреса
-        if !matched {
-            for _, dest := range rule.ResolvedDestinationPrefixes {
-                if matchesCIDR(query, dest) || strings.Contains(dest, query) {
-                    matched = true
-                    break
-                }
-            }
-        }
-        
-        // Проверяем по имени префикс-листа
-        if !matched {
-            for _, listName := range rule.Term.SourcePrefixLists {
-                if strings.Contains(strings.ToLower(listName), strings.ToLower(query)) {
-                    matched = true
-                    break
-                }
-            }
-        }
-        
-        if !matched {
-            for _, listName := range rule.Term.DestinationPrefixLists {
-                if strings.Contains(strings.ToLower(listName), strings.ToLower(query)) {
-                    matched = true
-                    break
-                }
-            }
-        }
-        
-        if matched {
-            results = append(results, rule)
-        }
-    }
-    
-    return results
-}
-
-// Выводит отладочную информацию о загруженных данных
-func debugData() {
-    log.Println("\n=== DEBUG INFO ===")
-    
-    // Выводим все префикс-листы
-    log.Println("\nPrefix Lists:")
-    for name, prefixes := range appState.PrefixLists {
-        log.Printf("  %s: %v\n", name, prefixes)
-    }
-    
-    // Выводим все правила
-    log.Println("\nPolicy Rules:")
-    for i, rule := range appState.PolicyRules {
-        log.Printf("\nRule %d: Filter: %s, Term: %s\n", i+1, rule.FilterName, rule.Term.Name)
-        log.Printf("  Source Addresses: %v\n", rule.Term.SourceAddresses)
-        log.Printf("  Destination Addresses: %v\n", rule.Term.DestinationAddresses)
-        log.Printf("  Source Prefix Lists: %v\n", rule.Term.SourcePrefixLists)
-        log.Printf("  Destination Prefix Lists: %v\n", rule.Term.DestinationPrefixLists)
-        log.Printf("  Resolved Sources: %v\n", rule.ResolvedSourcePrefixes)
-        log.Printf("  Resolved Destinations: %v\n", rule.ResolvedDestinationPrefixes)
-        log.Printf("  Protocol: %s\n", rule.Term.Protocol)
-        log.Printf("  Source Ports: %v\n", rule.Term.SourcePorts)
-        log.Printf("  Destination Ports: %v\n", rule.Term.DestinationPorts)
-        log.Printf("  Action: %s\n", rule.Term.Action)
-        log.Printf("  Counter: %s\n", rule.Term.Counter)
-    }
-    log.Println("=================")
-}
-
 // Обработчики HTTP
 func homeHandler(w http.ResponseWriter, r *http.Request) {
     tmpl := template.New("index.html").Funcs(template.FuncMap{
@@ -764,7 +677,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
     tmpl.Execute(w, data)
 }
 
-// searchHandler с кастомными функциями для шаблонов
+// Обработчик поиска
 func searchHandler(w http.ResponseWriter, r *http.Request) {
     query := r.URL.Query().Get("q")
     if query == "" {
@@ -789,7 +702,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
     
     data := struct {
         Query        string
-        MatchedRules []GroupedRule  // Изменено с []PolicyRule на []GroupedRule
+        MatchedRules []GroupedRule
         MemoryUsage  string
         SearchTime   string
     }{
@@ -800,20 +713,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
     }
     
     tmpl.Execute(w, data)
-}
-
-// TODO: Реализовать API для поиска
-func apiSearchHandler(w http.ResponseWriter, r *http.Request) {
-    query := r.URL.Query().Get("q")
-    if query == "" {
-        http.Error(w, "Query parameter 'q' is required", http.StatusBadRequest)
-        return
-    }
-    
-    results := searchRules(query)
-    
-    w.Header().Set("Content-Type", "application/json")
-    fmt.Fprintf(w, `{"query": "%s", "count": %d}`, query, len(results))
 }
 
 // Возвращает информацию об использовании памяти
@@ -906,8 +805,6 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     // Определяем статус доступа
     if len(rules) > 0 {
         data.AccessGranted = true
-        // В этой версии мы показываем только accept правила
-        // поэтому всегда будет AccessGranted если есть совпадения
     }
     
     tmpl.Execute(w, data)
