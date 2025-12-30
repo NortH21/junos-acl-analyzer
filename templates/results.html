@@ -147,6 +147,10 @@
             background: #fce4ec;
             color: #c2185b;
         }
+        .tag-filter {
+            background: #ffecb3;
+            color: #ff9800;
+        }
         .action-accept {
             color: #4CAF50;
             font-weight: bold;
@@ -203,6 +207,12 @@
             background: #9c27b0;
             color: white;
         }
+        .filters-count {
+            font-size: 14px;
+            color: #666;
+            margin-left: 10px;
+            font-weight: normal;
+        }
     </style>
 </head>
 <body>
@@ -243,87 +253,89 @@
             {{range $index, $rule := .MatchedRules}}
             <div class="rule-card">
                 <div class="rule-name">
-                    {{$rule.FilterName}} → {{$rule.Term.Name}}
+                    Term: {{$rule.TermName}}
+                    <!-- <span class="filters-count">(in {{len $rule.Filters}} filters)</span> -->
                     <span class="rule-counter">#{{add $index 1}}</span>
                 </div>
                 
-                {{if $rule.ResolvedSourcePrefixes}}
+                {{if $rule.Filters}}
                 <div class="rule-section">
-                    <div class="section-title">Source:</div>
-                    {{range $rule.ResolvedSourcePrefixes}}
+                    <div class="section-title">Filters:</div>
+                    {{range $rule.Filters}}
+                        <span class="tag tag-filter">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                
+                {{if $rule.SourcePrefixes}}
+                <div class="rule-section">
+                    <div class="section-title">Source prefixes:</div>
+                    {{range $rule.SourcePrefixes}}
                         <span class="tag tag-source">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
 
-                {{if $rule.Term.SourcePrefixLists}}
+                {{if $rule.SourcePrefixLists}}
                 <div class="rule-section">
                     <div class="section-title">Source prefix-lists:</div>
-                    {{range $rule.Term.SourcePrefixLists}}
+                    {{range $rule.SourcePrefixLists}}
                         <span class="tag prefix-list-name">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
                 
-                {{if $rule.ResolvedDestinationPrefixes}}
+                {{if $rule.DestinationPrefixes}}
                 <div class="rule-section">
-                    <div class="section-title">Destination:</div>
-                    {{range $rule.ResolvedDestinationPrefixes}}
+                    <div class="section-title">Destination prefixes:</div>
+                    {{range $rule.DestinationPrefixes}}
                         <span class="tag tag-destination">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
 
-                {{if $rule.Term.DestinationPrefixLists}}
+                {{if $rule.DestinationPrefixLists}}
                 <div class="rule-section">
                     <div class="section-title">Destination prefix-lists:</div>
-                    {{range $rule.Term.DestinationPrefixLists}}
+                    {{range $rule.DestinationPrefixLists}}
                         <span class="tag prefix-list-name">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
                 
-                {{if $rule.Term.SourcePorts}}
+                {{if $rule.SourcePorts}}
                 <div class="rule-section">
                     <div class="section-title">Source ports:</div>
-                    {{range $rule.Term.SourcePorts}}
+                    {{range $rule.SourcePorts}}
                         <span class="tag tag-port">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
                 
-                {{if $rule.Term.DestinationPorts}}
+                {{if $rule.DestinationPorts}}
                 <div class="rule-section">
                     <div class="section-title">Destination ports:</div>
-                    {{range $rule.Term.DestinationPorts}}
+                    {{range $rule.DestinationPorts}}
                         <span class="tag tag-port">{{.}}</span>
                     {{end}}
                 </div>
                 {{end}}
                 
-                {{if $rule.Term.Protocol}}
+                {{if $rule.Protocol}}
                 <div class="rule-section">
                     <div class="section-title">Protocol:</div>
-                    <span class="tag tag-protocol">{{$rule.Term.Protocol}}</span>
+                    <span class="tag tag-protocol">{{$rule.Protocol}}</span>
                 </div>
                 {{end}}
                 
                 <div class="rule-section">
                     <div class="section-title">Action:</div>
-                    {{if eq $rule.Term.Action "accept"}}
+                    {{if eq $rule.Action "accept"}}
                         <span class="action-accept">✓ Accept</span>
                     {{else}}
                         <span class="action-reject">✗ Reject</span>
                     {{end}}
                 </div>
-                <!--
-                {{if $rule.Term.Counter}}
-                <div class="rule-section">
-                    <div class="section-title">Traffic counter:</div>
-                    <span class="tag">{{$rule.Term.Counter}}</span>
-                </div>
-                {{end}}
-                -->
             </div>
             {{end}}
         {{else}}
@@ -335,6 +347,7 @@
                     <li>IP address: <code>10.237.241.14</code></li>
                     <li>Network: <code>10.237.241.0/24</code></li>
                     <li>Prefix list: <code>OPR-WEB-INTERNAL</code></li>
+                    <li>Term name: <code>NOC-2273</code></li>
                 </ul>
             </div>
         {{end}}
@@ -345,4 +358,3 @@
     </div>
 </body>
 </html>
-

@@ -131,6 +131,104 @@ func main() {
     }
 }
 
+// searchRulesWithGrouping ищет правила и группирует их
+func searchRulesWithGrouping(query string) []GroupedRule {
+    groupedRules := make(map[string]*GroupedRule)
+    
+    for _, rule := range appState.PolicyRules {
+        if !isSearchMatch(rule, query) {
+            continue
+        }
+        
+        // Создаем ключ для группировки
+        key := fmt.Sprintf("%s|%v|%v|%s|%v|%v|%s",
+            rule.Term.Name,
+            sortedSlice(rule.Term.SourcePrefixLists),
+            sortedSlice(rule.Term.DestinationPrefixLists),
+            rule.Term.Protocol,
+            sortedSlice(rule.Term.SourcePorts),
+            sortedSlice(rule.Term.DestinationPorts),
+            rule.Term.Action)
+        
+        if groupedRule, exists := groupedRules[key]; !exists {
+            groupedRules[key] = &GroupedRule{
+                TermName:                rule.Term.Name,
+                SourcePrefixes:         uniqueStrings(rule.ResolvedSourcePrefixes),
+                DestinationPrefixes:    uniqueStrings(rule.ResolvedDestinationPrefixes),
+                SourcePrefixLists:      uniqueStrings(rule.Term.SourcePrefixLists),
+                DestinationPrefixLists: uniqueStrings(rule.Term.DestinationPrefixLists),
+                Protocol:               rule.Term.Protocol,
+                SourcePorts:           uniqueStrings(rule.Term.SourcePorts),
+                DestinationPorts:      uniqueStrings(rule.Term.DestinationPorts),
+                Action:                 rule.Term.Action,
+                Filters:               []string{rule.FilterName},
+            }
+        } else {
+            // Добавляем фильтр, если его еще нет
+            if !containsString(groupedRule.Filters, rule.FilterName) {
+                groupedRule.Filters = append(groupedRule.Filters, rule.FilterName)
+            }
+            
+            // Добавляем уникальные префиксы
+            groupedRule.SourcePrefixes = appendUnique(groupedRule.SourcePrefixes, rule.ResolvedSourcePrefixes...)
+            groupedRule.DestinationPrefixes = appendUnique(groupedRule.DestinationPrefixes, rule.ResolvedDestinationPrefixes...)
+        }
+    }
+    
+    // Конвертируем map в slice и сортируем
+    result := make([]GroupedRule, 0, len(groupedRules))
+    for _, rule := range groupedRules {
+        sort.Strings(rule.Filters)
+        result = append(result, *rule)
+    }
+    
+    // Сортируем по имени term
+    sort.Slice(result, func(i, j int) bool {
+        return result[i].TermName < result[j].TermName
+    })
+    
+    return result
+}
+
+// isSearchMatch проверяет совпадает ли правило с поисковым запросом
+func isSearchMatch(rule PolicyRule, query string) bool {
+    query = strings.ToLower(strings.TrimSpace(query))
+    
+    // Проверяем source адреса
+    for _, source := range rule.ResolvedSourcePrefixes {
+        if matchesCIDR(query, source) || strings.Contains(strings.ToLower(source), query) {
+            return true
+        }
+    }
+    
+    // Проверяем destination адреса
+    for _, dest := range rule.ResolvedDestinationPrefixes {
+        if matchesCIDR(query, dest) || strings.Contains(strings.ToLower(dest), query) {
+            return true
+        }
+    }
+    
+    // Проверяем по имени префикс-листа
+    for _, listName := range rule.Term.SourcePrefixLists {
+        if strings.Contains(strings.ToLower(listName), query) {
+            return true
+        }
+    }
+    
+    for _, listName := range rule.Term.DestinationPrefixLists {
+        if strings.Contains(strings.ToLower(listName), query) {
+            return true
+        }
+    }
+    
+    // Проверяем по имени term (опционально)
+    if strings.Contains(strings.ToLower(rule.Term.Name), query) {
+        return true
+    }
+    
+    return false
+}
+
 // Загружает конфигурационные файлы
 func loadConfigFiles() error {
     mu.Lock()
@@ -674,10 +772,13 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    results := searchRules(query)
+    results := searchRulesWithGrouping(query)
     
     tmpl := template.New("results.html").Funcs(template.FuncMap{
         "add": func(a, b int) int { return a + b },
+        "join": func(items []string, sep string) string {
+            return strings.Join(items, sep)
+        },
     })
     
     tmpl, err := tmpl.ParseFiles("templates/results.html")
@@ -688,7 +789,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
     
     data := struct {
         Query        string
-        MatchedRules []PolicyRule
+        MatchedRules []GroupedRule  // Изменено с []PolicyRule на []GroupedRule
         MemoryUsage  string
         SearchTime   string
     }{
