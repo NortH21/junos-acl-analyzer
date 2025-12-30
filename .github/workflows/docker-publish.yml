@@ -3,10 +3,12 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - '**'
+      - main
     paths:
       - '*.go'
       - 'Dockerfile'
+  release:
+    types: [created]
 
 env:
   IMAGE: north21/junos-acl-analyzer
@@ -15,27 +17,16 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.1.1
-
-      - name: Set up QEMU
+      - name: Set up QEMU (для сборки ARM64)
         uses: docker/setup-qemu-action@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-        with:
-          driver-opts: |
-            image=moby/buildkit:master
-            network=host
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -50,21 +41,5 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          build-args: |
-            BUILDPLATFORM=linux/amd64
-
-      - name: Sign image
-        if: github.event_name != 'pull_request'
-        env:
-          COSIGN_EXPERIMENTAL: 1
-        run: |
-          cosign sign ${{ env.IMAGE }}:${{ github.sha }}
-          cosign sign ${{ env.IMAGE }}:latest
-
+            ${{ startsWith(github.ref, 'refs/tags/') && format('{0}:{1}', env.IMAGE, github.ref_name) || '' }}
