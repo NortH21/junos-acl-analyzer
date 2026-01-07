@@ -333,7 +333,7 @@ func autoReloadConfigs(interval time.Duration) {
             log.Printf("⚠️ Error while reloading files: %v", err)
         }
     }
-}
+}ф
 
 // Парсит файл с префикс-листами
 func parsePrefixLists(filename string) error {
