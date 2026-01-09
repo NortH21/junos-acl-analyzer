@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - '*.go'
+      - '*.html'
       - 'Dockerfile'
   create:
     tags:
