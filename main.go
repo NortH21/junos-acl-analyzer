@@ -1064,4 +1064,3 @@ func portMatches(queryPort, rulePort string) bool {
     
     return false
 }
-
