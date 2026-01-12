@@ -4,7 +4,14 @@
 
 ### Run
 ```
-docker run -d --pull=always -p 8080:8080 -v /path_to_repo/jcore-filters:/app/jcore-filters --name junos-acl-analyzer north21/junos-acl-analyzer:latest
+LATEST_TAG=$(curl -s "https://hub.docker.com/v2/repositories/north21/junos-acl-analyzer/tags/?ordering=last_updated" | jq -r '.results[0].name')
+
+docker run -d \
+  --pull=always \
+  -p 8080:8080 \
+  -v /path_to_repo/jcore-filters:/app/jcore-filters \
+  --name junos-acl-analyzer \
+  north21/junos-acl-analyzer:${LATEST_TAG}
 ```
 
 #### Обновление правил
