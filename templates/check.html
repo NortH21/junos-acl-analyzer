@@ -245,12 +245,12 @@
                     <div class="result-header access-granted">
                         ✅ ACCESS OPEN
                     </div>
-                    <p>Found {{len .MatchingRules}} rules that allow access:</p>
+                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}} that allow access:</p>
                 {{else if .AccessPartial}}
                     <div class="result-header access-partial">
                         ⚠️ ACCESS PARTIALLY OPEN
                     </div>
-                    <p>Found {{len .MatchingRules}} rules, but there are restrictions:</p>
+                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}}, but there are restrictions:</p>
                 {{else}}
                     <div class="result-header access-denied">
                         ❌ ACCESS DENIED
@@ -322,7 +322,7 @@
                             <span class="tag tag-port">{{.}}</span>
                         {{end}}
                     </div>
-                    {{else if .Checked}}
+                    {{else if not $.Port}}
                     <div class="rule-detail">
                         <strong>Ports:</strong> <span class="tag tag-port">ALL</span>
                     </div>
