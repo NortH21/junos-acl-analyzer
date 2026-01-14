@@ -39,13 +39,28 @@
             font-weight: bold;
             color: #333;
         }
-        input[type="text"] {
+        input[type="text"], select {
             width: 100%;
             padding: 12px;
             border: 2px solid #ddd;
             border-radius: 5px;
             font-size: 16px;
             box-sizing: border-box;
+        }
+        select {
+            appearance: none;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23666' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            background-size: 12px;
+            padding-right: 40px;
+        }
+        select:focus, input:focus {
+            outline: none;
+            border-color: #4CAF50;
+            box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.2);
         }
         .form-row {
             display: flex;
@@ -186,6 +201,12 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        .form-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 20px;
+        }
     </style>
 </head>
 <body>
@@ -203,7 +224,6 @@
                                    name="src" 
                                    value="{{.Src}}"
                                    placeholder="For example: 10.237.241.14 or 192.168.1.0/24">
-                            <!-- <div class="input-example">IP address or network of the source</div> -->
                         </div>
                     </div>
                     <div class="form-col">
@@ -214,7 +234,6 @@
                                    name="dst" 
                                    value="{{.Dst}}"
                                    placeholder="For example: 10.10.10.5 or 10.0.0.0/8">
-                            <!-- <div class="input-example">Destination IP address or network</div> -->
                         </div>
                     </div>
                 </div>
@@ -226,11 +245,23 @@
                            name="port" 
                            value="{{.Port}}"
                            placeholder="For example: 443, 80-90, or leave empty for all ports">
-                    <!-- <div class="input-example">You can specify a port or range (22, 80-443, https)</div> -->
                 </div>
                 
-                <button type="submit" class="truth-btn">🔍 Search</button>
-                <a href="/" class="back-btn">← Back</a>
+                <div class="form-group">
+                    <label for="filter">Filter (optional):</label>
+                    <select id="filter" name="filter">
+                        <option value="">-- All filters --</option>
+                        {{range .AllFilters}}
+                            <option value="{{.}}" {{if eq . $.Filter}}selected{{end}}>{{.}}</option>
+                        {{end}}
+                    </select>
+                    <div class="input-example">Filter the rules by specific filter name</div>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="truth-btn">🔍 Search</button>
+                    <a href="/" class="back-btn">← Back</a>
+                </div>
             </form>
         </div>
         
@@ -266,6 +297,9 @@
                 {{end}}
                 {{if .Port}}
                     <div class="rule-detail"><strong>Port:</strong> {{.Port}}</div>
+                {{end}}
+                {{if .Filter}}
+                    <div class="rule-detail"><strong>Filter:</strong> {{.Filter}}</div>
                 {{end}}
             </div>
             
@@ -366,7 +400,46 @@
         document.getElementById('truthForm').addEventListener('submit', function() {
             document.getElementById('loading').style.display = 'block';
         });
+        
+        // Сохраняем состояние формы в localStorage
+        function saveFormState() {
+            const formData = {
+                filter: document.getElementById('filter').value
+            };
+            localStorage.setItem('checkFormState', JSON.stringify(formData));
+        }
+        
+        // Восстанавливаем состояние формы
+        function restoreFormState() {
+            try {
+                const saved = localStorage.getItem('checkFormState');
+                if (saved) {
+                    const formData = JSON.parse(saved);
+                    document.getElementById('port').value = formData.port || '';
+                    
+                    if (formData.filter) {
+                        const filterSelect = document.getElementById('filter');
+                        for (let i = 0; i < filterSelect.options.length; i++) {
+                            if (filterSelect.options[i].value === formData.filter) {
+                                filterSelect.selectedIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch(e) {
+                console.log('Error restoring form state:', e);
+            }
+        }
+        
+        // Навешиваем обработчики на все поля формы
+        document.querySelectorAll('#truthForm input, #truthForm select').forEach(function(element) {
+            element.addEventListener('change', saveFormState);
+            element.addEventListener('input', saveFormState);
+        });
+        
+        // Восстанавливаем состояние при загрузке
+        document.addEventListener('DOMContentLoaded', restoreFormState);
     </script>
 </body>
 </html>
-

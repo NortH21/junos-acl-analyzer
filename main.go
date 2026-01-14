@@ -85,6 +85,8 @@ type CheckPageData struct {
     Src            string
     Dst            string
     Port           string
+    Filter         string
+    AllFilters     []string
     Checked        bool
     AccessGranted  bool
     AccessPartial  bool
@@ -778,11 +780,18 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     src := r.URL.Query().Get("src")
     dst := r.URL.Query().Get("dst")
     port := r.URL.Query().Get("port")
+    filter := r.URL.Query().Get("filter")
     
     tmpl := template.New("check.html").Funcs(template.FuncMap{
         "add": func(a, b int) int { return a + b },
         "join": func(items []string, sep string) string {
             return strings.Join(items, sep)
+        },
+        "selected": func(a, b string) string {
+            if a == b {
+                return "selected"
+            }
+            return ""
         },
     })
     
@@ -793,9 +802,8 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     }
     
     data := CheckPageData{
-        Src:   src,
-        Dst:   dst,
-        Port:  port,
+        Filter:    filter,
+        AllFilters: getAllFilterNames(),
     }
     
     // Если все поля пустые, просто показываем форму
@@ -809,8 +817,22 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     data.Checked = true
     data.MatchingRules = rules
     
+    // Фильтруем по выбранному фильтру, если указан
+    if filter != "" {
+        filteredRules := []GroupedRule{}
+        for _, rule := range rules {
+            for _, f := range rule.Filters {
+                if f == filter {
+                    filteredRules = append(filteredRules, rule)
+                    break
+                }
+            }
+        }
+        data.MatchingRules = filteredRules
+    }
+    
     // Определяем статус доступа
-    if len(rules) > 0 {
+    if len(data.MatchingRules) > 0 {
         data.AccessGranted = true
     }
     
@@ -1068,3 +1090,20 @@ func portMatches(queryPort, rulePort string) bool {
     
     return false
 }
+
+func getAllFilterNames() []string {
+    filterMap := make(map[string]bool)
+    
+    for _, rule := range appState.PolicyRules {
+        filterMap[rule.FilterName] = true
+    }
+    
+    filters := make([]string, 0, len(filterMap))
+    for filter := range filterMap {
+        filters = append(filters, filter)
+    }
+    
+    sort.Strings(filters)
+    return filters
+}
+
