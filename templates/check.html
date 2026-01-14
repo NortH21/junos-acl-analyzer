@@ -404,6 +404,9 @@
         // Сохраняем состояние формы в localStorage
         function saveFormState() {
             const formData = {
+                src: document.getElementById('src').value,
+                dst: document.getElementById('dst').value,
+                port: document.getElementById('port').value,
                 filter: document.getElementById('filter').value
             };
             localStorage.setItem('checkFormState', JSON.stringify(formData));
@@ -415,6 +418,8 @@
                 const saved = localStorage.getItem('checkFormState');
                 if (saved) {
                     const formData = JSON.parse(saved);
+                    document.getElementById('src').value = formData.src || '';
+                    document.getElementById('dst').value = formData.dst || '';
                     document.getElementById('port').value = formData.port || '';
                     
                     if (formData.filter) {

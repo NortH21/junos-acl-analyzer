@@ -86,7 +86,7 @@ type CheckPageData struct {
     Dst            string
     Port           string
     Filter         string
-    AllFilters     []string
+    AllFilters     []string    // Список всех фильтров
     Checked        bool
     AccessGranted  bool
     AccessPartial  bool
@@ -787,12 +787,6 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
         "join": func(items []string, sep string) string {
             return strings.Join(items, sep)
         },
-        "selected": func(a, b string) string {
-            if a == b {
-                return "selected"
-            }
-            return ""
-        },
     })
     
     tmpl, err := tmpl.ParseFiles("templates/check.html")
@@ -802,8 +796,9 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     }
     
     data := CheckPageData{
-        Filter:    filter,
-        AllFilters: getAllFilterNames(),
+        Src:   src,
+        Dst:   dst,
+        Port:  port,
     }
     
     // Если все поля пустые, просто показываем форму
@@ -814,8 +809,6 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
     
     // Ищем правила
     rules := checkAccess(src, dst, port)
-    data.Checked = true
-    data.MatchingRules = rules
     
     // Фильтруем по выбранному фильтру, если указан
     if filter != "" {
@@ -828,11 +821,14 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
                 }
             }
         }
-        data.MatchingRules = filteredRules
+        rules = filteredRules
     }
     
+    data.Checked = true
+    data.MatchingRules = rules
+    
     // Определяем статус доступа
-    if len(data.MatchingRules) > 0 {
+    if len(rules) > 0 {
         data.AccessGranted = true
     }
     
