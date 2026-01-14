@@ -14,6 +14,7 @@ import (
     "sort"
     "path/filepath"
     "strconv"
+    "net"
 )
 
 // Префикс-лист Juniper
@@ -628,18 +629,24 @@ func matchesCIDR(query, cidr string) bool {
     
     // Если ищем IP без маски
     if !strings.Contains(query, "/") && strings.Contains(cidr, "/") {
-        // Простая проверка по префиксу
-        parts := strings.Split(cidr, "/")
-        if len(parts) != 2 {
+        // Парсим CIDR
+        _, ipNet, err := net.ParseCIDR(cidr)
+        if err != nil {
             return false
         }
         
-        network := parts[0]
-        // Проверяем, начинается ли query с network
-        return strings.HasPrefix(query+".", network+".")
+        // Парсим запрос как IP
+        queryIP := net.ParseIP(query)
+        if queryIP == nil {
+            return false
+        }
+        
+        // Проверяем вхождение IP в сеть
+        return ipNet.Contains(queryIP)
     }
     
-    return false
+    // Если оба с маской, сравниваем как строки
+    return query == cidr
 }
 
 // Обработчики HTTP
@@ -882,21 +889,20 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
     // Проверяем source
     srcMatch := false
     if src == "" {
-        // Если source не указан, считаем что совпадает (но только если в правиле есть source)
-        if len(rule.ResolvedSourcePrefixes) > 0 {
-            srcMatch = true
-        }
+        // Если source не указан, считаем что совпадает с любым source
+        srcMatch = true
     } else {
-        // Проверяем совпадение по source
-        for _, sourcePrefix := range rule.ResolvedSourcePrefixes {
-            if matchesCIDR(src, sourcePrefix) {
-                srcMatch = true
-                break
-            }
-        }
-        // Если нет source префиксов в правиле, пропускаем
+        // Если в правиле нет source префиксов, значит правило не ограничивает source
         if len(rule.ResolvedSourcePrefixes) == 0 {
-            return false
+            srcMatch = true
+        } else {
+            // Проверяем совпадение по source
+            for _, sourcePrefix := range rule.ResolvedSourcePrefixes {
+                if matchesCIDR(src, sourcePrefix) {
+                    srcMatch = true
+                    break
+                }
+            }
         }
     }
     
@@ -907,21 +913,20 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
     // Проверяем destination
     dstMatch := false
     if dst == "" {
-        // Если destination не указан, считаем что совпадает (но только если в правиле есть destination)
-        if len(rule.ResolvedDestinationPrefixes) > 0 {
-            dstMatch = true
-        }
+        // Если destination не указан, считаем что совпадает с любым destination
+        dstMatch = true
     } else {
-        // Проверяем совпадение по destination
-        for _, destPrefix := range rule.ResolvedDestinationPrefixes {
-            if matchesCIDR(dst, destPrefix) {
-                dstMatch = true
-                break
-            }
-        }
-        // Если нет destination префиксов в правиле, пропускаем
+        // Если в правиле нет destination префиксов, значит правило не ограничивает destination
         if len(rule.ResolvedDestinationPrefixes) == 0 {
-            return false
+            dstMatch = true
+        } else {
+            // Проверяем совпадение по destination
+            for _, destPrefix := range rule.ResolvedDestinationPrefixes {
+                if matchesCIDR(dst, destPrefix) {
+                    dstMatch = true
+                    break
+                }
+            }
         }
     }
     
@@ -929,7 +934,6 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
         return false
     }
     
-    // Проверяем порты
     portMatch := false
     if port == "" {
         // Если порт не указан, считаем что совпадает
