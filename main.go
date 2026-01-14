@@ -799,6 +799,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
         Src:   src,
         Dst:   dst,
         Port:  port,
+        AllFilters: getAllFilterNames(),
     }
     
     // Если все поля пустые, просто показываем форму
