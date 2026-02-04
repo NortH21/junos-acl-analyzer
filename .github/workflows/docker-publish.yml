@@ -14,7 +14,7 @@ on:
 
 env:
   IMAGE: north21/junos-acl-analyzer
-  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/junos-acl-analyzer
+  GHCR_IMAGE: ghcr.io/north21/junos-acl-analyzer
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
