@@ -574,7 +574,9 @@ func parseFromSection(line string, term *PolicyTerm,
     // Обработка destination-port
     if strings.HasPrefix(line, "destination-port ") {
         ports := strings.TrimSuffix(strings.TrimPrefix(line, "destination-port "), ";")
-        term.DestinationPorts = append(term.DestinationPorts, ports)
+        // Парсим порты из строки с диапазонами
+        parsedPorts := parsePortRange(ports)
+        term.DestinationPorts = append(term.DestinationPorts, parsedPorts...)
         return
     }
 }
@@ -1044,34 +1046,44 @@ func portMatches(queryPort, rulePort string) bool {
         return true
     }
     
-    // Проверяем диапазоны портов
+    // Пробуем преобразовать queryPort в число
+    queryNum, queryErr := strconv.Atoi(queryPort)
+    
+    // Проверяем диапазоны портов в rulePort
     if strings.Contains(rulePort, "-") {
         parts := strings.Split(rulePort, "-")
         if len(parts) == 2 {
             start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
             end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
             if err1 == nil && err2 == nil {
-                queryNum, err := strconv.Atoi(queryPort)
-                if err == nil && queryNum >= start && queryNum <= end {
+                // Если queryPort - число
+                if queryErr == nil && queryNum >= start && queryNum <= end {
                     return true
+                }
+                // Если queryPort тоже диапазон
+                if strings.Contains(queryPort, "-") {
+                    qParts := strings.Split(queryPort, "-")
+                    if len(qParts) == 2 {
+                        qStart, qErr1 := strconv.Atoi(strings.TrimSpace(qParts[0]))
+                        qEnd, qErr2 := strconv.Atoi(strings.TrimSpace(qParts[1]))
+                        if qErr1 == nil && qErr2 == nil {
+                            // Проверяем пересечение диапазонов
+                            if qStart <= end && qEnd >= start {
+                                return true
+                            }
+                        }
+                    }
                 }
             }
         }
     }
     
-    // Проверяем если запрос - диапазон, а правило - одиночный порт
-    if strings.Contains(queryPort, "-") {
-        parts := strings.Split(queryPort, "-")
-        if len(parts) == 2 {
-            start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-            end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-            ruleNum, err3 := strconv.Atoi(rulePort)
-            if err1 == nil && err2 == nil && err3 == nil {
-                // Если правило покрывает хотя бы часть диапазона
-                if ruleNum >= start && ruleNum <= end {
-                    return true
-                }
-            }
+    // Проверяем если queryPort - диапазон, а rulePort - одиночный порт
+    if queryErr == nil && !strings.Contains(queryPort, "-") {
+        // queryPort - число, rulePort - одиночный порт
+        ruleNum, ruleErr := strconv.Atoi(rulePort)
+        if ruleErr == nil && queryNum == ruleNum {
+            return true
         }
     }
     
@@ -1080,12 +1092,46 @@ func portMatches(queryPort, rulePort string) bool {
         return true
     }
     
-    // Проверяем если правило содержит запрос как подстроку
-    if strings.Contains(ruleLower, queryLower) {
-        return true
+    // Проверяем множественные порты (через запятую или пробел)
+    if strings.Contains(rulePort, ",") || strings.Contains(rulePort, " ") {
+        var ports []string
+        if strings.Contains(rulePort, ",") {
+            ports = strings.Split(rulePort, ",")
+        } else {
+            ports = strings.Fields(rulePort)
+        }
+        for _, p := range ports {
+            p = strings.TrimSpace(p)
+            if portMatches(queryPort, p) {
+                return true
+            }
+        }
     }
     
     return false
+}
+
+// Парсит порты из строки с диапазонами
+func parsePortRange(portStr string) []string {
+    portStr = strings.TrimSpace(portStr)
+    var result []string
+    
+    // Если порт в квадратных скобках, убираем их
+    if strings.HasPrefix(portStr, "[") && strings.HasSuffix(portStr, "]") {
+        portStr = portStr[1 : len(portStr)-1]
+    }
+    
+    // Разделяем по пробелам
+    parts := strings.Fields(portStr)
+    
+    for _, part := range parts {
+        part = strings.TrimSpace(part)
+        if part != "" {
+            result = append(result, part)
+        }
+    }
+    
+    return result
 }
 
 func getAllFilterNames() []string {
