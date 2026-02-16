@@ -11,6 +11,8 @@ docker run -d \
   -p 8080:8080 \
   -v /path_to_repo/jcore-filters:/app/jcore-filters \
   --name junos-acl-analyzer \
+  -e JIRA_URL="https://jira.example.com/browse/"
+  -e NETBOX_URL="https://netbox.example.com/search/?q="
   north21/junos-acl-analyzer:${LATEST_TAG}
 ```
 

@@ -238,7 +238,15 @@
         <div class="results-meta">
             <div class="meta-item">
                 <span class="meta-label">Query:</span>
-                <span class="meta-value">{{.Query}}</span>
+                <span class="meta-value">
+                    {{if .Query}}
+                        {{if hasPrefix .Query "NOC-"}}
+                            <a href="{{getJiraURL}}{{.Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
+                        {{else}}
+                            <a href="{{getNetboxURL}}{{.Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
+                        {{end}}
+                    {{end}}
+                </span>
             </div>
             <div class="meta-item">
                 <span class="meta-label">Rules found:</span>

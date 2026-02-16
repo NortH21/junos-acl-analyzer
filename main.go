@@ -697,12 +697,28 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
     }
     
     results := searchRulesWithGrouping(query)
+
+    // Получаем URL из переменных окружения
+    jiraURL := os.Getenv("JIRA_URL")
+    if jiraURL == "" {
+        jiraURL = "https://jira.example.com/browse/"
+    }
+    
+    netboxURL := os.Getenv("NETBOX_URL")
+    if netboxURL == "" {
+        netboxURL = "https://netbox.example.com/search/?q="
+    }
     
     tmpl := template.New("results.html").Funcs(template.FuncMap{
         "add": func(a, b int) int { return a + b },
         "join": func(items []string, sep string) string {
             return strings.Join(items, sep)
         },
+        "hasPrefix": func(s, prefix string) bool {
+            return strings.HasPrefix(s, prefix)
+        },
+        "getJiraURL": func() string { return jiraURL },
+        "getNetboxURL": func() string { return netboxURL },
     })
     
     tmpl, err := tmpl.ParseFiles("templates/results.html")
