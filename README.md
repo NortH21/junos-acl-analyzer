@@ -21,5 +21,5 @@ docker run -d \
 Обычно в рабочий день репа обновляется 2-6 раз в сутки.
 ```
 crontab -l
-0 11-18 * * 1-5 cd /path_to_repo/jcore-filters; git pull >> ~/cron.log 2>&1
+0 10-19 * * 1-5 cd /path_to_repo/jcore-filters; git pull >> ~/cron.log 2>&1
 ```
