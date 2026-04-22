@@ -212,7 +212,10 @@
 <body>
     <script src="https://cdn.jsdelivr.net/gh/Alaev-Co/snowflakes/dist/Snow.min.js"></script>
     <script>
-        new Snow();
+        const currentMonth = new Date().getMonth();
+        if (currentMonth === 11 || currentMonth === 0 || currentMonth === 1) {
+            new Snow();
+        }
     </script>
     <button id="theme-toggle" class="theme-toggle" title="Toggle theme">🌙</button>
     <div class="container">
