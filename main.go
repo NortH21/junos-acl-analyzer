@@ -120,6 +120,9 @@ func main() {
     http.HandleFunc("/search", searchHandler)
     http.HandleFunc("/check", checkHandler)
     http.HandleFunc("/api/memory", apiMemoryHandler)
+    
+    // Serve static files (CSS, JS, etc.)
+    http.Handle("/templates/", http.FileServer(http.Dir(".")))
 
     log.Printf("✅ Server started on http://localhost:8080") // TODO: Вынести адрес и порт в конфиг
     log.Println("📊 Prefix lists loaded:", len(appState.PrefixLists))
