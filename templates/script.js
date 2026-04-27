@@ -1,3 +1,11 @@
+// Snowflakes effect for winter months
+function initSnowflakes() {
+    const currentMonth = new Date().getMonth();
+    if (currentMonth === 11 || currentMonth === 0 || currentMonth === 1) {
+        new Snow();
+    }
+}
+
 // Theme toggle functionality (common for all pages)
 function initThemeToggle() {
     const themeToggle = document.getElementById('theme-toggle');
@@ -92,6 +100,7 @@ function initFormState() {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    initSnowflakes();
     initThemeToggle();
     initFormState();
 });
