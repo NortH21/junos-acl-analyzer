@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"html/template"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,6 +66,10 @@ type PolicyRule struct {
 	Term                        PolicyTerm
 	ResolvedSourcePrefixes      []string // Разрешенные префиксы из префикс-листов
 	ResolvedDestinationPrefixes []string // Разрешенные префиксы для destination
+
+	// Разобранные адресные условия для сопоставления
+	srcAddrs addrSet
+	dstAddrs addrSet
 }
 
 // Хранит состояние приложения
@@ -287,16 +290,22 @@ func searchRulesWithGrouping(state *AppState, query string) []GroupedRule {
 func isSearchMatch(rule PolicyRule, query string) bool {
 	query = strings.ToLower(strings.TrimSpace(query))
 
-	// Проверяем source адреса
+	// Адрес или сеть ищем по пересечению: 10.1.1.5 находит 10.1.1.0/24,
+	// а 10.1.0.0/16 находит все префиксы внутри
+	if prefix, ok := parsePrefix(query); ok {
+		return rule.srcAddrs.overlaps(prefix) || rule.dstAddrs.overlaps(prefix)
+	}
+
+	// Неполный адрес ("10.237.") ищем только с начала префикса,
+	// иначе "10.1" находит и 110.1.0.0/16
 	for _, source := range rule.ResolvedSourcePrefixes {
-		if matchesCIDR(query, source) || strings.Contains(strings.ToLower(source), query) {
+		if strings.HasPrefix(strings.ToLower(source), query) {
 			return true
 		}
 	}
 
-	// Проверяем destination адреса
 	for _, dest := range rule.ResolvedDestinationPrefixes {
-		if matchesCIDR(query, dest) || strings.Contains(strings.ToLower(dest), query) {
+		if strings.HasPrefix(strings.ToLower(dest), query) {
 			return true
 		}
 	}
@@ -656,75 +665,80 @@ func parseThenSection(line string, term *PolicyTerm) {
 // Разворачивает префикс-листы в конкретные префиксы
 func resolvePrefixLists(state *AppState) {
 	missing := make(map[string]bool)
+	invalid := make(map[string]bool)
 
 	for i, rule := range state.PolicyRules {
-		var resolvedSourcePrefixes []string
-		var resolvedDestinationPrefixes []string
+		resolved, addrs := resolveAddresses(state, rule.Term.SourceAddresses, rule.Term.SourcePrefixLists, missing, invalid)
+		state.PolicyRules[i].ResolvedSourcePrefixes = resolved
+		state.PolicyRules[i].srcAddrs = addrs
 
-		// Добавляем прямые source-address
-		resolvedSourcePrefixes = append(resolvedSourcePrefixes, rule.Term.SourceAddresses...)
-
-		// Разворачивает source префикс-листы
-		for _, listName := range rule.Term.SourcePrefixLists {
-			if prefixes, exists := state.PrefixLists[listName]; exists {
-				resolvedSourcePrefixes = append(resolvedSourcePrefixes, prefixes...)
-			} else {
-				missing[listName] = true
-			}
-		}
-
-		// Добавляем прямые destination-address
-		resolvedDestinationPrefixes = append(resolvedDestinationPrefixes, rule.Term.DestinationAddresses...)
-
-		// Разворачивает destination префикс-листы
-		for _, listName := range rule.Term.DestinationPrefixLists {
-			if prefixes, exists := state.PrefixLists[listName]; exists {
-				resolvedDestinationPrefixes = append(resolvedDestinationPrefixes, prefixes...)
-			} else {
-				missing[listName] = true
-			}
-		}
-
-		state.PolicyRules[i].ResolvedSourcePrefixes = resolvedSourcePrefixes
-		state.PolicyRules[i].ResolvedDestinationPrefixes = resolvedDestinationPrefixes
+		resolved, addrs = resolveAddresses(state, rule.Term.DestinationAddresses, rule.Term.DestinationPrefixLists, missing, invalid)
+		state.PolicyRules[i].ResolvedDestinationPrefixes = resolved
+		state.PolicyRules[i].dstAddrs = addrs
 	}
 
 	if len(missing) > 0 {
-		names := make([]string, 0, len(missing))
-		for name := range missing {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		log.Printf("⚠️ Prefix lists referenced but not defined (%d): %v", len(names), names)
+		log.Printf("⚠️ Prefix lists referenced but not defined (%d): %v", len(missing), sortedKeys(missing))
+	}
+	if len(invalid) > 0 {
+		log.Printf("⚠️ Prefixes that could not be parsed (%d): %v", len(invalid), sortedKeys(invalid))
 	}
 }
 
-// Проверяет, попадает ли IP/префикс под CIDR
-func matchesCIDR(query, cidr string) bool {
-	if query == cidr {
-		return true
+// Собирает адресное условие терма из прямых адресов и префикс-листов.
+// Возвращает префиксы для отображения и разобранное условие для сопоставления
+func resolveAddresses(state *AppState, addresses, listNames []string, missing, invalid map[string]bool) ([]string, addrSet) {
+	var resolved []string
+	addrs := addrSet{constrained: len(addresses) > 0 || len(listNames) > 0}
+
+	add := func(text string, isExcept bool) {
+		prefix, ok := parsePrefix(text)
+		if !ok {
+			invalid[text] = true
+			return
+		}
+		if isExcept {
+			addrs.except = append(addrs.except, prefix)
+		} else {
+			addrs.nets = append(addrs.nets, prefix)
+		}
 	}
 
-	// Если ищем IP без маски
-	if !strings.Contains(query, "/") && strings.Contains(cidr, "/") {
-		// Парсим CIDR
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			return false
-		}
-
-		// Парсим запрос как IP
-		queryIP := net.ParseIP(query)
-		if queryIP == nil {
-			return false
-		}
-
-		// Проверяем вхождение IP в сеть
-		return ipNet.Contains(queryIP)
+	// Прямые адреса, в том числе "10.0.0.0/8 except"
+	for _, address := range addresses {
+		resolved = append(resolved, address)
+		text, isExcept := strings.CutSuffix(address, " except")
+		add(text, isExcept)
 	}
 
-	// Если оба с маской, сравниваем как строки
-	return query == cidr
+	// Префикс-листы, в том числе "LIST except"
+	for _, listName := range listNames {
+		name, isExcept := strings.CutSuffix(listName, " except")
+		prefixes, exists := state.PrefixLists[name]
+		if !exists {
+			missing[name] = true
+			continue
+		}
+		for _, prefix := range prefixes {
+			if isExcept {
+				resolved = append(resolved, prefix+" except")
+			} else {
+				resolved = append(resolved, prefix)
+			}
+			add(prefix, isExcept)
+		}
+	}
+
+	return resolved, addrs
+}
+
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Обработчики HTTP
@@ -949,52 +963,21 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
 		return false
 	}
 
-	// Проверяем source
-	srcMatch := false
-	if src == "" {
-		// Если source не указан, считаем что совпадает с любым source
-		srcMatch = true
-	} else {
-		// Если в терме нет условий по source, значит правило не ограничивает source.
-		// Пустой или ненайденный префикс-лист - это условие, под которое ничего не попадает
-		if len(rule.Term.SourceAddresses) == 0 && len(rule.Term.SourcePrefixLists) == 0 {
-			srcMatch = true
-		} else {
-			// Проверяем совпадение по source
-			for _, sourcePrefix := range rule.ResolvedSourcePrefixes {
-				if matchesCIDR(src, sourcePrefix) {
-					srcMatch = true
-					break
-				}
-			}
-		}
+	// Проверяем source. Нераспознанный адрес не подходит ни под одно правило
+	srcPrefix, srcOK := parsePrefix(src)
+	if src != "" && !srcOK {
+		return false
 	}
-
-	if !srcMatch {
+	if rule.srcAddrs.match(srcPrefix, src != "") == matchNone {
 		return false
 	}
 
 	// Проверяем destination
-	dstMatch := false
-	if dst == "" {
-		// Если destination не указан, считаем что совпадает с любым destination
-		dstMatch = true
-	} else {
-		// Если в терме нет условий по destination, значит правило не ограничивает destination
-		if len(rule.Term.DestinationAddresses) == 0 && len(rule.Term.DestinationPrefixLists) == 0 {
-			dstMatch = true
-		} else {
-			// Проверяем совпадение по destination
-			for _, destPrefix := range rule.ResolvedDestinationPrefixes {
-				if matchesCIDR(dst, destPrefix) {
-					dstMatch = true
-					break
-				}
-			}
-		}
+	dstPrefix, dstOK := parsePrefix(dst)
+	if dst != "" && !dstOK {
+		return false
 	}
-
-	if !dstMatch {
+	if rule.dstAddrs.match(dstPrefix, dst != "") == matchNone {
 		return false
 	}
 

@@ -524,3 +524,101 @@ set policy-options prefix-list EMPTY
 		t.Errorf("unexpected prefix lists parsed: %v", lists)
 	}
 }
+
+const addressTestConf = `filter TEST-IN {
+    term TO-DB {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+            destination-prefix-list {
+                DB;
+            }
+        }
+        then accept;
+    }
+    term BARE-HOST {
+        from {
+            source-address {
+                192.168.50.7;
+            }
+        }
+        then accept;
+    }
+    term WITH-EXCEPT {
+        from {
+            source-address {
+                172.16.0.0/12;
+                172.16.5.0/24 except;
+            }
+        }
+        then accept;
+    }
+    term BAD-PREFIX {
+        from {
+            source-address {
+                not-an-address;
+            }
+        }
+        then accept;
+    }
+}
+`
+
+func TestCheckAccessAddresses(t *testing.T) {
+	loadTestConfig(t, testACL, addressTestConf)
+
+	tests := []struct {
+		src, dst string
+		term     string
+		want     bool
+	}{
+		{"10.1.1.5", "10.2.2.2", "TO-DB", true},
+		{"10.1.1.5/32", "10.2.2.2/32", "TO-DB", true},
+		{"10.1.1.128/25", "10.2.2.0/25", "TO-DB", true}, // подсеть разрешенной сети
+		{"10.1.1.0/24", "10.2.2.0/24", "TO-DB", true},
+		{"10.1.2.5", "10.2.2.2", "TO-DB", false},
+		{"10.1.1.5", "10.2.3.2", "TO-DB", false},
+		{"garbage", "10.2.2.2", "TO-DB", false},
+		{"192.168.50.7", "", "BARE-HOST", true}, // адрес в правиле без маски
+		{"192.168.50.8", "", "BARE-HOST", false},
+		{"172.16.1.1", "", "WITH-EXCEPT", true},
+		{"172.16.5.9", "", "WITH-EXCEPT", false},
+		{"8.8.8.8", "", "BAD-PREFIX", false},
+	}
+	for _, tt := range tests {
+		rules := checkAccess(getState(), tt.src, tt.dst, "")
+		if got := hasTerm(rules, tt.term); got != tt.want {
+			t.Errorf("src=%q dst=%q: term %s matched = %v, want %v", tt.src, tt.dst, tt.term, got, tt.want)
+		}
+	}
+}
+
+func TestSearch(t *testing.T) {
+	loadTestConfig(t, testACL, addressTestConf)
+
+	tests := []struct {
+		query string
+		term  string
+		want  bool
+	}{
+		{"10.1.1.5", "TO-DB", true},
+		{"10.1.1.5/32", "TO-DB", true},
+		{"10.2.2.0/24", "TO-DB", true},
+		{"10.2.0.0/16", "TO-DB", true}, // сеть находит префиксы внутри себя
+		{"10.3.0.0/16", "TO-DB", false},
+		{"0.1.1.5", "TO-DB", false},
+		{"10.1.", "TO-DB", true},
+		{"0.1.", "TO-DB", false}, // раньше находилось подстрокой
+		{"web", "TO-DB", true},
+		{"to-db", "TO-DB", true},
+		{"172.16.5.1", "WITH-EXCEPT", true}, // except тоже часть правила
+		{"192.168.50.7", "BARE-HOST", true},
+	}
+	for _, tt := range tests {
+		rules := searchRulesWithGrouping(getState(), tt.query)
+		if got := hasTerm(rules, tt.term); got != tt.want {
+			t.Errorf("search %q: term %s found = %v, want %v", tt.query, tt.term, got, tt.want)
+		}
+	}
+}

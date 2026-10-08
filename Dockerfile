@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -ldflags="-w -s" \
     -trimpath \
     -o /app/junos-acl-analyzer \
-    ./main.go
+    .
 
 FROM alpine:3.23
 
