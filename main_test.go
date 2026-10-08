@@ -1083,8 +1083,8 @@ func TestCheckPagePartialAccess(t *testing.T) {
 
 func TestStaticFiles(t *testing.T) {
 	files := map[string]string{
-		"/static/snow-init.js":                   "text/javascript",
-		"/static/check.js":                       "text/javascript",
+		"/static/script.js":                      "text/javascript",
+		"/static/styles.css":                     "text/css",
 		"/static/vendor/snowflakes/Snow.min.js":  "text/javascript",
 		"/static/vendor/snowflakes/snow.min.css": "text/css",
 	}
@@ -1198,5 +1198,32 @@ func TestProbes(t *testing.T) {
 	newHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /healthz: status %d, want 405", rec.Code)
+	}
+}
+
+// Общие стили, тема и скрипт подключаются на всех страницах из /static/
+func TestPagesUseSharedAssets(t *testing.T) {
+	loadTestConfig(t, testACL, orderTestConf)
+
+	for _, target := range []string{"/", "/search?q=WEB", "/check", "/check?src=10.1.1.5"} {
+		body := get(t, target).Body.String()
+		for _, want := range []string{
+			`<link rel="stylesheet" href="/static/styles.css">`,
+			`<script src="/static/script.js"></script>`,
+			`id="theme-toggle"`,
+			"</html>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: %q not found", target, want)
+			}
+		}
+		if strings.Contains(body, "<style") || strings.Contains(body, "/templates/") {
+			t.Errorf("%s: page still uses inline styles or /templates/ paths", target)
+		}
+	}
+
+	// Шаблоны наружу не отдаются
+	if rec := get(t, "/templates/index.html"); rec.Code != http.StatusNotFound {
+		t.Errorf("/templates/index.html: status %d, want 404", rec.Code)
 	}
 }

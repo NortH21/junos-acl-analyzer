@@ -231,7 +231,7 @@ func TestAllLogLinesFollowGuidelines(t *testing.T) {
 		"/search?q=" + strings.Repeat("10.9.9.9-", 5000),
 		"/search",
 		"/10.20.30.40/secret",
-		"/static/check.js",
+		"/static/script.js",
 		"/static/10.1.1.1.js",
 		"/api/memory",
 	}
@@ -310,8 +310,8 @@ func TestQuietRequestsAreNotLogged(t *testing.T) {
 	loadTestConfig(t, testACL, logTestConf)
 	out := captureLogs(t, slog.LevelInfo)
 
-	get(t, "/static/check.js")
-	get(t, "/static/snow-init.js")
+	get(t, "/static/script.js")
+	get(t, "/static/styles.css")
 
 	probe := httptest.NewRequest(http.MethodGet, "/", nil)
 	probe.Header.Set("User-Agent", "kube-probe/1.31")
