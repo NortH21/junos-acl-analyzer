@@ -1083,10 +1083,10 @@ func TestCheckPagePartialAccess(t *testing.T) {
 
 func TestStaticFiles(t *testing.T) {
 	files := map[string]string{
-		"/static/script.js":                      "text/javascript",
-		"/static/styles.css":                     "text/css",
-		"/static/vendor/snowflakes/Snow.min.js":  "text/javascript",
-		"/static/vendor/snowflakes/snow.min.css": "text/css",
+		"/static/script.js":                           "text/javascript",
+		"/static/styles.css":                          "text/css",
+		"/static/third_party/snowflakes/Snow.min.js":  "text/javascript",
+		"/static/third_party/snowflakes/snow.min.css": "text/css",
 	}
 	for target, contentType := range files {
 		rec := get(t, target)
@@ -1098,7 +1098,7 @@ func TestStaticFiles(t *testing.T) {
 		}
 	}
 
-	for _, target := range []string{"/static/", "/static/vendor/", "/static/nope.js", "/static/../main.go"} {
+	for _, target := range []string{"/static/", "/static/third_party/", "/static/nope.js", "/static/../main.go"} {
 		if rec := get(t, target); rec.Code == http.StatusOK {
 			t.Errorf("%s: must not be served", target)
 		}
