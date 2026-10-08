@@ -345,6 +345,10 @@
                     <div class="section-title">Action:</div>
                     {{if eq $rule.Action "accept"}}
                         <span class="action-accept">✓ Accept</span>
+                    {{else if eq $rule.Action "discard"}}
+                        <span class="action-reject">✗ Discard</span>
+                    {{else if eq $rule.Action "next"}}
+                        <span class="action-reject">→ Next term</span>
                     {{else}}
                         <span class="action-reject">✗ Reject</span>
                     {{end}}

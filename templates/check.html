@@ -377,6 +377,8 @@
                         <strong>Action:</strong> 
                         {{if eq .Action "accept"}}
                             <span style="color: #4CAF50; font-weight: bold;">✓ Accept</span>
+                        {{else if eq .Action "discard"}}
+                            <span style="color: #f44336; font-weight: bold;">✗ Discard</span>
                         {{else}}
                             <span style="color: #f44336; font-weight: bold;">✗ Reject</span>
                         {{end}}

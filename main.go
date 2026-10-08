@@ -487,6 +487,12 @@ func parsePolicyRules(filename string) error {
 		} else if line == "then {" {
 			currentSection = "then"
 			continue
+		} else if currentSection == "" && strings.HasPrefix(line, "then ") && strings.HasSuffix(line, ";") {
+			// Однострочная форма: "then discard;"
+			if currentTerm != nil {
+				parseThenSection(strings.TrimPrefix(line, "then "), currentTerm)
+			}
+			continue
 		}
 
 		// Парсинг содержимого разделов
@@ -583,14 +589,30 @@ func parseFromSection(line string, term *PolicyTerm,
 
 // Парсит секцию "then"
 func parseThenSection(line string, term *PolicyTerm) {
-	if strings.HasPrefix(line, "count ") {
-		term.Counter = strings.TrimSuffix(strings.TrimPrefix(line, "count "), ";")
-	} else if strings.HasPrefix(line, "accept") {
+	stmt := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ";"))
+	fields := strings.Fields(stmt)
+	if len(fields) == 0 {
+		return
+	}
+
+	switch fields[0] {
+	case "count":
+		if len(fields) > 1 {
+			term.Counter = fields[1]
+		}
+	case "accept":
 		term.Action = "accept"
-		// Для accept не нужно обрезать ";", так как префикс уже совпал
-	} else if strings.HasPrefix(line, "reject") || strings.HasPrefix(line, "deny") {
+	case "reject", "deny":
+		// reject может иметь аргумент (например, tcp-reset)
 		term.Action = "reject"
-		// Для reject/deny не нужно обрезать ";", так как префикс уже совпал
+	case "discard":
+		// discard может иметь аргумент (например, accounting)
+		term.Action = "discard"
+	case "next":
+		// "next term" - нетерминирующее действие, обработка идет дальше
+		if len(fields) > 1 && fields[1] == "term" {
+			term.Action = "next"
+		}
 	}
 }
 
