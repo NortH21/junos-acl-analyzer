@@ -38,6 +38,7 @@ func loadTestFiles(t *testing.T, files map[string]string) {
 
 	t.Chdir(dir)
 	currentState.Store(newAppState())
+	reportedProblems = make(map[string]string)
 	if err := loadConfigFiles(); err != nil {
 		t.Fatalf("loadConfigFiles: %v", err)
 	}

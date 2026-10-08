@@ -3,16 +3,20 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -74,6 +78,17 @@ type PolicyRule struct {
 type AppState struct {
 	PrefixLists map[string][]string
 	PolicyRules []PolicyRule
+
+	files       int          // Сколько файлов прочитано
+	fingerprint string       // Хеш содержимого файлов, чтобы отличать реальные изменения
+	problems    loadProblems // Что не удалось разобрать
+}
+
+// Значения из конфигов, которые не удалось разобрать или найти
+type loadProblems struct {
+	missingLists    []string // Префикс-листы, на которые есть ссылка, но нет определения
+	invalidPrefixes []string
+	invalidPorts    []string
 }
 
 // Для статистики приложения
@@ -146,22 +161,35 @@ func getState() *AppState {
 
 func main() {
 	startTime = time.Now()
+	log := componentLogger("server")
 
-	// Парсинг файлов
-	if err := loadConfigFiles(); err != nil {
-		log.Printf("⚠️ Initial load error: %v", err)
+	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	logLevel.Set(level)
+	if err != nil {
+		log.Warn("invalid LOG_LEVEL, using info", "error", err.Error())
 	}
-	// Автообновление каждые 2 минут
-	go autoReloadConfigs(2 * time.Minute)
 
-	log.Println("📊 Prefix lists loaded:", len(getState().PrefixLists))
-	log.Println("📊 Policy rules loaded:", len(getState().PolicyRules))
+	trustedProxies, err = parseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		log.Error("invalid TRUSTED_PROXIES", "error", err.Error())
+		os.Exit(1)
+	}
 
 	// Адрес можно переопределить, например LISTEN_ADDR=127.0.0.1:9090
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
+
+	log.Info("server starting",
+		"listen_addr", addr,
+		"log_level", levelName(level),
+		"trusted_proxies", len(trustedProxies))
+
+	// Парсинг файлов. Результат и ошибки загрузчик пишет в лог сам
+	_ = loadConfigFiles()
+	// Автообновление каждые 2 минут
+	go autoReloadConfigs(2 * time.Minute)
 
 	// Таймауты не дают медленным клиентам удерживать соединения бесконечно
 	server := &http.Server{
@@ -171,11 +199,14 @@ func main() {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		// Внутренние ошибки net/http тоже должны выходить в JSON
+		ErrorLog: slog.NewLogLogger(componentLogger("http").Handler(), slog.LevelError),
 	}
 
-	log.Printf("✅ Server listening on %s", addr)
-	// Fatal, чтобы при ошибке запуска процесс завершился с ненулевым кодом
-	log.Fatalf("❌ Server error: %v", server.ListenAndServe())
+	// Выходим с ненулевым кодом, чтобы сбой запуска был виден оркестратору
+	err = server.ListenAndServe()
+	log.Error("server stopped", "error", err.Error())
+	os.Exit(1)
 }
 
 // Собирает HTTP-обработчики приложения
@@ -189,7 +220,7 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /api/memory", apiMemoryHandler)
 	mux.Handle("GET /static/", staticHandler())
 
-	return securityHeaders(mux)
+	return logRequests(securityHeaders(mux))
 }
 
 // Стили пока встроены в шаблоны, поэтому для них разрешен inline.
@@ -235,7 +266,7 @@ func renderTemplate(w http.ResponseWriter, name string, data any) {
 func renderTemplateStatus(w http.ResponseWriter, status int, name string, data any) {
 	var buf bytes.Buffer
 	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {
-		log.Printf("❌ Template %s error: %v", name, err)
+		componentLogger("http").Error("cannot render template "+name, "error", err.Error())
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -243,7 +274,8 @@ func renderTemplateStatus(w http.ResponseWriter, status int, name string, data a
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := buf.WriteTo(w); err != nil {
-		log.Printf("⚠️ Response write error: %v", err)
+		// Обычно клиент просто закрыл соединение
+		componentLogger("http").Debug("cannot write response", "error", err.Error())
 	}
 }
 
@@ -329,39 +361,111 @@ func isSearchMatch(rule PolicyRule, query string) bool {
 	return false
 }
 
-// Загружает конфигурационные файлы и публикует новое состояние
+// Загружает конфигурационные файлы и публикует новое состояние.
+// Все подробности пишет в лог сама, вызывающему коду дублировать их не нужно
 func loadConfigFiles() error {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 
-	log.Println("🔄 Loading configuration files...")
+	log := componentLogger("loader")
+	start := time.Now()
 
 	oldState := getState()
-	newState, loadErr := buildState()
-
-	log.Printf("✅ Loaded: %d prefix lists, %d rules",
-		len(newState.PrefixLists), len(newState.PolicyRules))
+	newState, loadErr := buildState(log)
+	oldHasData := len(oldState.PrefixLists) > 0 || len(oldState.PolicyRules) > 0
 
 	// Если ни один файл не загрузился, оставляем старое состояние
 	if len(newState.PrefixLists) == 0 && len(newState.PolicyRules) == 0 {
-		log.Println("⚠️ No data loaded, keeping old state")
-		return fmt.Errorf("no data loaded from any file")
+		log.Error("no filter data loaded, keeping previous state",
+			"files", newState.files,
+			"prefix_lists", len(oldState.PrefixLists),
+			"rules", len(oldState.PolicyRules))
+		return errors.New("no data loaded from any file")
 	}
 
 	// Файл мог читаться в момент обновления репозитория. Частичные данные хуже
 	// устаревших, поэтому при ошибке оставляем уже загруженное состояние
-	oldHasData := len(oldState.PrefixLists) > 0 || len(oldState.PolicyRules) > 0
 	if loadErr != nil && oldHasData {
-		log.Println("⚠️ Load finished with errors, keeping old state")
+		log.Error("filter reload finished with errors, keeping previous state",
+			"error", loadErr.Error(),
+			"prefix_lists", len(oldState.PrefixLists),
+			"rules", len(oldState.PolicyRules))
 		return loadErr
 	}
 
+	duration := time.Since(start).Milliseconds()
+
+	// Перезагрузка раз в две минуты обычно ничего не меняет. Чтобы не засорять
+	// лог одинаковыми строками, на уровне info пишем только реальные изменения
+	if loadErr == nil && newState.fingerprint == oldState.fingerprint {
+		log.Debug("filters unchanged", "files", newState.files, "duration_ms", duration)
+		return nil
+	}
+
 	currentState.Store(newState)
+
+	msg := fmt.Sprintf("filters loaded: %d prefix lists, %d rules from %d files",
+		len(newState.PrefixLists), len(newState.PolicyRules), newState.files)
+	attrs := []any{
+		"prefix_lists", len(newState.PrefixLists),
+		"rules", len(newState.PolicyRules),
+		"files", newState.files,
+		"duration_ms", duration,
+	}
+	if loadErr != nil {
+		log.Warn(msg+", some files failed", append(attrs, "error", loadErr.Error())...)
+	} else {
+		log.Info(msg, attrs...)
+	}
+
+	reportProblems(log, newState.problems)
 	return loadErr
 }
 
+// О каких проблемах в данных уже сообщали. Защищено reloadMu
+var reportedProblems = make(map[string]string)
+
+// Пишет предупреждения о значениях, которые не удалось разобрать. Повторяет их,
+// только когда набор изменился: иначе одно и то же шло бы в лог каждые две минуты
+func reportProblems(log *slog.Logger, problems loadProblems) {
+	kinds := []struct {
+		name     string
+		items    []string
+		found    string
+		resolved string
+	}{
+		{"missing_prefix_list", problems.missingLists,
+			"%d prefix lists are referenced but not defined, terms using them match nothing",
+			"all referenced prefix lists are defined again"},
+		{"invalid_prefix", problems.invalidPrefixes,
+			"%d prefixes could not be parsed, they are ignored when matching",
+			"all prefixes are parsed again"},
+		{"invalid_port", problems.invalidPorts,
+			"%d ports could not be parsed, terms using them match any port only partially",
+			"all ports are parsed again"},
+	}
+
+	for _, kind := range kinds {
+		signature := strings.Join(kind.items, "\n")
+		if reportedProblems[kind.name] == signature {
+			continue
+		}
+		reportedProblems[kind.name] = signature
+
+		if len(kind.items) == 0 {
+			log.Info(kind.resolved, "problem", kind.name)
+			continue
+		}
+		// Сами значения только в поле: среди них есть адреса
+		log.Warn(fmt.Sprintf(kind.found, len(kind.items)),
+			"problem", kind.name,
+			"count", len(kind.items),
+			"sample", logSample(kind.items))
+	}
+}
+
 // Собирает состояние из файлов, не трогая опубликованное
-func buildState() (*AppState, error) {
+func buildState(log *slog.Logger) (*AppState, error) {
 	state := newAppState()
 
 	// Шаблоны файлов которые парсим
@@ -390,27 +494,34 @@ func buildState() (*AppState, error) {
 	// Убираем дубликаты
 	allAclFiles = uniqueFiles(allAclFiles)
 	allConfFiles = uniqueFiles(allConfFiles)
+	state.files = len(allAclFiles) + len(allConfFiles)
 
-	log.Printf("📁 Found ACL files: %v", allAclFiles)
-	log.Printf("📁 Found CONF files: %v", allConfFiles)
+	log.Debug("filter files found",
+		"acl_files", len(allAclFiles),
+		"conf_files", len(allConfFiles))
 
 	var errs []error
+	hash := sha256.New()
 
 	// Парсим ACL файлы
 	for _, aclFile := range allAclFiles {
-		if err := parsePrefixLists(state, aclFile); err != nil {
-			log.Printf("⚠️ ACL file error %s: %v", aclFile, err)
+		io.WriteString(hash, aclFile+"\n")
+		if err := parsePrefixLists(state, aclFile, hash); err != nil {
+			log.Warn("cannot read prefix list file "+filepath.Base(aclFile), "filter_file", aclFile, "error", err.Error())
 			errs = append(errs, fmt.Errorf("%s: %w", aclFile, err))
 		}
 	}
 
 	// Парсим CONF файлы
 	for _, confFile := range allConfFiles {
-		if err := parsePolicyRules(state, confFile); err != nil {
-			log.Printf("⚠️ CONF file error %s: %v", confFile, err)
+		io.WriteString(hash, confFile+"\n")
+		if err := parsePolicyRules(state, confFile, hash); err != nil {
+			log.Warn("cannot read filter file "+filepath.Base(confFile), "filter_file", confFile, "error", err.Error())
 			errs = append(errs, fmt.Errorf("%s: %w", confFile, err))
 		}
 	}
+
+	state.fingerprint = hex.EncodeToString(hash.Sum(nil))
 
 	// Разворачивает префикс-листы
 	resolvePrefixLists(state)
@@ -441,21 +552,39 @@ func autoReloadConfigs(interval time.Duration) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := loadConfigFiles(); err != nil {
-			log.Printf("⚠️ Error while reloading files: %v", err)
-		}
+		reloadSafely()
 	}
 }
 
+// Перезагрузка с перехватом паники: сбой разбора не должен ронять сервис,
+// а стектрейс должен попасть в лог одним событием
+func reloadSafely() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			stack := string(debug.Stack())
+			if len(stack) > maxStacktraceLen {
+				stack = stack[:maxStacktraceLen] + "..."
+			}
+			componentLogger("loader").Error("panic while reloading filters",
+				"error", truncateLogValue(fmt.Sprint(recovered)),
+				"stacktrace", stack)
+		}
+	}()
+
+	// Результат и ошибки загрузчик пишет в лог сам
+	_ = loadConfigFiles()
+}
+
 // Парсит файл с префикс-листами
-func parsePrefixLists(state *AppState, filename string) error {
+func parsePrefixLists(state *AppState, filename string, hash io.Writer) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	// Содержимое попутно попадает в хеш состояния
+	scanner := bufio.NewScanner(io.TeeReader(file, hash))
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	for scanner.Scan() {
@@ -485,14 +614,15 @@ func parsePrefixLists(state *AppState, filename string) error {
 
 // Парсит файл с политиками.
 // Вложенность отслеживается стеком блоков: filter -> term -> from/then -> блок условий
-func parsePolicyRules(state *AppState, filename string) error {
+func parsePolicyRules(state *AppState, filename string, hash io.Writer) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	// Содержимое попутно попадает в хеш состояния
+	scanner := bufio.NewScanner(io.TeeReader(file, hash))
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	var stack []string
 	var currentFilter string
@@ -686,14 +816,10 @@ func resolvePrefixLists(state *AppState) {
 		}
 	}
 
-	if len(missing) > 0 {
-		log.Printf("⚠️ Prefix lists referenced but not defined (%d): %v", len(missing), sortedKeys(missing))
-	}
-	if len(invalid) > 0 {
-		log.Printf("⚠️ Prefixes that could not be parsed (%d): %v", len(invalid), sortedKeys(invalid))
-	}
-	if len(invalidPorts) > 0 {
-		log.Printf("⚠️ Ports that could not be parsed (%d): %v", len(invalidPorts), sortedKeys(invalidPorts))
+	state.problems = loadProblems{
+		missingLists:    sortedKeys(missing),
+		invalidPrefixes: sortedKeys(invalid),
+		invalidPorts:    sortedKeys(invalidPorts),
 	}
 }
 
@@ -789,6 +915,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := searchRulesWithGrouping(getState(), query)
+	addLogString(r, "query", query)
+	addLogAttrs(r, slog.Int("matches", len(results)))
 
 	data := struct {
 		Query        string
@@ -879,8 +1007,15 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Что проверяли и чем закончилось, попадает в access-лог отдельными полями
+	addLogString(r, "src", src)
+	addLogString(r, "dst", dst)
+	addLogString(r, "port", port)
+	addLogString(r, "filter", filter)
+
 	query, err := parseAccessQuery(src, dst, port)
 	if err != nil {
+		addLogAttrs(r, slog.String("result", "invalid"))
 		data.Error = err.Error()
 		renderTemplateStatus(w, http.StatusBadRequest, "check.html", data)
 		return
@@ -903,6 +1038,14 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.AccessPartial = len(result.Allowed) > 0 && !data.AccessGranted
+
+	outcome := "denied"
+	if data.AccessGranted {
+		outcome = "open"
+	} else if data.AccessPartial {
+		outcome = "partial"
+	}
+	addLogAttrs(r, slog.String("result", outcome), slog.Int("matches", len(result.Allowed)))
 
 	renderTemplate(w, "check.html", data)
 }
