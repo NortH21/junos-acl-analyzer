@@ -226,11 +226,10 @@ func addLogString(r *http.Request, key, value string) {
 	}
 }
 
-// Запоминает код ответа и размер тела
+// Запоминает код ответа
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
-	bytes  int64
 }
 
 func (w *statusRecorder) WriteHeader(status int) {
@@ -244,9 +243,7 @@ func (w *statusRecorder) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	n, err := w.ResponseWriter.Write(data)
-	w.bytes += int64(n)
-	return n, err
+	return w.ResponseWriter.Write(data)
 }
 
 // Для http.ResponseController
@@ -334,7 +331,6 @@ func logRequests(next http.Handler) http.Handler {
 				slog.String("path", truncateLogValue(r.URL.Path)),
 				slog.Int("status", status),
 				slog.Int64("duration_ms", duration.Milliseconds()),
-				slog.Int64("response_bytes", recorder.bytes),
 			}
 			attrs = append(attrs, entry.attrs...)
 

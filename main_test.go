@@ -1163,3 +1163,40 @@ func TestJiraLinkIgnoresCase(t *testing.T) {
 		t.Error("term not found by lowercase task id")
 	}
 }
+
+func TestProbes(t *testing.T) {
+	// Данных нет: процесс жив, но к работе не готов
+	currentState.Store(newAppState())
+	if rec := get(t, "/healthz"); rec.Code != http.StatusOK {
+		t.Errorf("/healthz without data: status %d, want 200", rec.Code)
+	}
+	if rec := get(t, "/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz without data: status %d, want 503", rec.Code)
+	}
+
+	loadTestConfig(t, testACL, "filter F {\n    term T1 {\n        then accept;\n    }\n}\n")
+	for _, target := range []string{"/healthz", "/readyz"} {
+		rec := get(t, target)
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "ok" {
+			t.Errorf("%s: status %d, body %q", target, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control %q", target, got)
+		}
+	}
+
+	// Неудачная перезагрузка оставляет прежние данные, сервис остается готовым
+	if err := os.RemoveAll("jcore-filters"); err != nil {
+		t.Fatal(err)
+	}
+	_ = loadConfigFiles()
+	if rec := get(t, "/readyz"); rec.Code != http.StatusOK {
+		t.Errorf("/readyz after a failed reload: status %d, want 200", rec.Code)
+	}
+
+	rec := httptest.NewRecorder()
+	newHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /healthz: status %d, want 405", rec.Code)
+	}
+}

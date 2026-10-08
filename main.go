@@ -219,6 +219,9 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /check", checkHandler)
 	mux.HandleFunc("GET /api/memory", apiMemoryHandler)
 	mux.Handle("GET /static/", staticHandler())
+	// Пробы Kubernetes
+	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("GET /readyz", readyHandler)
 
 	return logRequests(securityHeaders(mux))
 }
@@ -954,6 +957,29 @@ func getUptime() string {
 		return fmt.Sprintf("%.0f minutes", duration.Minutes())
 	}
 	return fmt.Sprintf("%.0f seconds", duration.Seconds())
+}
+
+// Liveness: процесс жив и отвечает на запросы
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	writeProbe(w, http.StatusOK, "ok")
+}
+
+// Readiness: фильтры загружены, сервису есть что отвечать. Пока данных нет,
+// проверка доступа показывала бы "доступ закрыт" для любого запроса
+func readyHandler(w http.ResponseWriter, r *http.Request) {
+	state := getState()
+	if len(state.PrefixLists) == 0 && len(state.PolicyRules) == 0 {
+		writeProbe(w, http.StatusServiceUnavailable, "filters are not loaded")
+		return
+	}
+	writeProbe(w, http.StatusOK, "ok")
+}
+
+func writeProbe(w http.ResponseWriter, status int, text string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	fmt.Fprintln(w, text)
 }
 
 // Обработчик API для информации о памяти и статистике

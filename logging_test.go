@@ -321,16 +321,31 @@ func TestQuietRequestsAreNotLogged(t *testing.T) {
 		t.Fatalf("quiet requests were logged:\n%s", out.String())
 	}
 
+	get(t, "/healthz")
+	get(t, "/readyz")
+	if lines := logLines(t, out); len(lines) != 0 {
+		t.Fatalf("successful probes were logged:\n%s", out.String())
+	}
+
 	// Ошибки пишутся и для них
 	get(t, "/static/missing.js")
-	get(t, "/healthz")
+	currentState.Store(newAppState())
+	get(t, "/readyz")
+
 	lines := logLines(t, out)
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines for failed quiet requests, want 2:\n%s", len(lines), out.String())
 	}
+	if lines[0]["status"] != 404.0 || lines[0]["level"] != "warn" {
+		t.Errorf("unexpected line: %s", lines[0]["_raw"])
+	}
+	if lines[1]["status"] != 503.0 || lines[1]["level"] != "error" || lines[1]["path"] != "/readyz" {
+		t.Errorf("unexpected line: %s", lines[1]["_raw"])
+	}
 	for _, line := range lines {
-		if line["status"] != 404.0 || line["level"] != "warn" {
-			t.Errorf("unexpected line: %s", line["_raw"])
+		checkLogLine(t, line)
+		if _, ok := line["response_bytes"]; ok {
+			t.Errorf("response_bytes must not be logged: %s", line["_raw"])
 		}
 	}
 }

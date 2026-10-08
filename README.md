@@ -25,10 +25,18 @@ docker run -d \
 | `LOG_LEVEL` | `info` | Уровень логов: `debug`, `info`, `warn`, `error` |
 | `TRUSTED_PROXIES` | пусто | Адреса и сети ingress через запятую. Только от них принимается `X-Forwarded-For` для поля `remote_addr` |
 
+#### Пробы Kubernetes
+| Путь | Ответ |
+| --- | --- |
+| `/healthz` | `200`, пока процесс отвечает на запросы (liveness) |
+| `/readyz` | `200`, когда фильтры загружены; `503`, пока данных нет (readiness) |
+
+После неудачной перезагрузки сервис продолжает работать на прежних данных и остается готовым.
+
 #### Логи
 Одно событие - одна строка JSON в stdout, время в UTC:
 ```json
-{"time":"2026-10-08T18:58:22.566Z","level":"info","msg":"GET /check -> 200 in 23ms","app":"junos-acl-analyzer","component":"http","request_id":"a57715016152c37941cc769df82ecec9","remote_addr":"203.0.113.9","method":"GET","path":"/check","status":200,"duration_ms":23,"response_bytes":713346,"src":"10.237.241.14","port":"443","result":"open","matches":198}
+{"time":"2026-10-08T18:58:22.566Z","level":"info","msg":"GET /check -> 200 in 23ms","app":"junos-acl-analyzer","component":"http","request_id":"a57715016152c37941cc769df82ecec9","remote_addr":"203.0.113.9","method":"GET","path":"/check","status":200,"duration_ms":23,"src":"10.237.241.14","port":"443","result":"open","matches":198}
 ```
 
 - `component` - подсистема: `server` (запуск), `loader` (чтение фильтров), `http` (запросы).
