@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Junos ACL Analyzer</title>
-    <link rel="stylesheet" href="/templates/styles.css">
-    <link href="/templates/snow.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="/static/third_party/snowflakes/snow.min.css" rel="stylesheet">
 </head>
 <body>
-    <script src="/templates/snow.min.js"></script>
+    <script src="/static/third_party/snowflakes/Snow.min.js"></script>
     <button id="theme-toggle" class="theme-toggle" title="Toggle theme">🌙</button>
     <div class="container">
         <h1>🤝 Щас все расскажу, брат</h1>
@@ -70,6 +70,15 @@
             <p>Checking the rules...</p>
         </div>
         
+        {{if .Error}}
+            <div class="result-card">
+                <div class="result-header access-denied">
+                    ⚠️ INVALID REQUEST
+                </div>
+                <p>{{.Error}}</p>
+            </div>
+        {{end}}
+
         {{if .Checked}}
             <div class="result-card">
                 {{if .AccessGranted}}
@@ -81,14 +90,18 @@
                     <div class="result-header access-partial">
                         ⚠️ ACCESS PARTIALLY OPEN
                     </div>
-                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}}, but there are restrictions:</p>
+                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}} that allow access, but deny terms earlier in the filter may block part of the traffic:</p>
                 {{else}}
                     <div class="result-header access-denied">
                         ❌ ACCESS DENIED
                     </div>
+                    {{if .BlockingRules}}
+                    <p>The traffic is blocked by {{len .BlockingRules}} deny term{{if ne (len .BlockingRules) 1}}s{{end}} shown below.</p>
+                    {{else}}
                     <p>Found no rules that allow access with the specified parameters.</p>
+                    {{end}}
                 {{end}}
-                
+
                 {{if .Src}}
                     <div class="rule-detail"><strong>Source:</strong> {{.Src}}</div>
                 {{end}}
@@ -102,9 +115,27 @@
                     <div class="rule-detail"><strong>Filter:</strong> {{.Filter}}</div>
                 {{end}}
             </div>
-            
+
             {{if .MatchingRules}}
                 {{range .MatchingRules}}
+                    {{template "check-rule-card" .}}
+                {{end}}
+            {{else if .BlockingRules}}
+                {{range .BlockingRules}}
+                    {{template "check-rule-card" .}}
+                {{end}}
+            {{else}}
+                <div class="no-rules">
+                    <p>🤔 No matching rules were found in the ACL.</p>
+                </div>
+            {{end}}
+        {{end}}
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
+{{define "check-rule-card"}}
                 <div class="rule-card">
                     <div class="rule-name">
                         Term: {{.TermName}}
@@ -156,7 +187,7 @@
                             <span class="tag tag-port">{{.}}</span>
                         {{end}}
                     </div>
-                    {{else if not $.Port}}
+                    {{else}}
                     <div class="rule-detail">
                         <strong>Ports:</strong> <span class="tag tag-port">ALL</span>
                     </div>
@@ -168,15 +199,44 @@
                     </div>
                     {{end}}
                     
+                    {{if .SourcePorts}}
+                    <div class="rule-detail">
+                        <strong>Source ports:</strong>
+                        {{range .SourcePorts}}
+                            <span class="tag tag-port">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
+                    {{if .OtherConditions}}
+                    <div class="rule-detail">
+                        <strong>Other conditions:</strong>
+                        {{range .OtherConditions}}
+                            <span class="tag tag-protocol">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
                     <div class="rule-detail">
                         <strong>Action:</strong> 
                         {{if eq .Action "accept"}}
                             <span style="color: #4CAF50; font-weight: bold;">✓ Accept</span>
+                        {{else if eq .Action "discard"}}
+                            <span style="color: #f44336; font-weight: bold;">✗ Discard</span>
                         {{else}}
                             <span style="color: #f44336; font-weight: bold;">✗ Reject</span>
                         {{end}}
                     </div>
                     
+                    {{if .ShadowedBy}}
+                    <div class="rule-detail rule-warning">
+                        ⚠️ <strong>May be blocked earlier in the filter by:</strong>
+                        {{range .ShadowedBy}}
+                            <span class="tag tag-deny">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
                     {{if .Filters}}
                     <div class="rule-detail" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd;">
                         <strong>Used in filters:</strong>
@@ -187,12 +247,4 @@
                     </div>
                     {{end}}
                 </div>
-                {{end}}
-            {{else if .Checked}}
-                <div class="no-rules">
-                    <p>🤔 No matching rules were found in the ACL.</p>
-                </div>
-            {{end}}
-        {{end}}
-    </div>
-    <script src="/templates/script.js"></script>
+{{end}}

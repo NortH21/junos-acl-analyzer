@@ -1,7 +1,5 @@
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git
-
 WORKDIR /app
 
 COPY go.mod ./
@@ -11,13 +9,17 @@ COPY . .
 
 ARG TARGETOS TARGETARCH
 
+# Шаблоны и статика встраиваются в бинарник (go:embed)
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -ldflags="-w -s" \
     -trimpath \
     -o /app/junos-acl-analyzer \
-    ./main.go
+    .
 
 FROM alpine:3.23
+
+# tzdata нужен, чтобы TZ действительно применялся
+RUN apk add --no-cache tzdata
 
 ENV TZ=Europe/Moscow
 
@@ -27,11 +29,9 @@ RUN addgroup -g 1000 app && \
 WORKDIR /app
 
 COPY --from=builder --chown=appuser:app /app/junos-acl-analyzer ./
-COPY --from=builder --chown=appuser:app /app/templates ./templates/
 
 USER appuser
 
 EXPOSE 8080
 
 CMD ["./junos-acl-analyzer"]
-

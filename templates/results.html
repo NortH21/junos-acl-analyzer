@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Search results - Junos ACL Analyzer</title>
-    <link rel="stylesheet" href="/templates/styles.css">
-    <link href="/templates/snow.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="/static/third_party/snowflakes/snow.min.css" rel="stylesheet">
 </head>
 <body>
-    <script src="/templates/snow.min.js"></script>
+    <script src="/static/third_party/snowflakes/Snow.min.js"></script>
     <button id="theme-toggle" class="theme-toggle" title="Toggle theme">🌙</button>
     <div class="container">
         <h1>🔍 Search results - Junos ACL Analyzer</h1>
@@ -29,10 +29,10 @@
                 <span class="meta-label">Query:</span>
                 <span class="meta-value">
                     {{if .Query}}
-                        {{if hasPrefix .Query "NOC-"}}
-                            <a href="{{getJiraURL}}{{.Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
+                        {{if isJiraQuery .Query}}
+                            <a href="{{jiraLink .Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
                         {{else}}
-                            <a href="{{getNetboxURL}}{{.Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
+                            <a href="{{netboxLink .Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
                         {{end}}
                     {{end}}
                 </span>
@@ -130,10 +130,23 @@
                 </div>
                 {{end}}
                 
+                {{if $rule.OtherConditions}}
+                <div class="rule-section">
+                    <div class="section-title">Other conditions:</div>
+                    {{range $rule.OtherConditions}}
+                        <span class="tag tag-protocol">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
                 <div class="rule-section">
                     <div class="section-title">Action:</div>
                     {{if eq $rule.Action "accept"}}
                         <span class="action-accept">✓ Accept</span>
+                    {{else if eq $rule.Action "discard"}}
+                        <span class="action-reject">✗ Discard</span>
+                    {{else if eq $rule.Action "next"}}
+                        <span class="action-reject">→ Next term</span>
                     {{else}}
                         <span class="action-reject">✗ Reject</span>
                     {{end}}
@@ -158,6 +171,6 @@
             <a href="/" class="back-link">← Back to main page</a>
         </div>
     </div>
-    <script src="/templates/script.js"></script>
+    <script src="/static/script.js"></script>
 </body>
 </html>

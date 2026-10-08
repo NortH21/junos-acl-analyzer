@@ -657,3 +657,23 @@ select:focus, input:focus {
 .truth-btn-large:hover {
     background-color: #f57c00;
 }
+
+/* Запрещающие термы и предупреждения на странице проверки */
+.tag-deny {
+    background: #ffebee;
+    color: #c62828;
+}
+
+.dark-theme .tag-deny {
+    background: #b71c1c;
+    color: #ffcdd2;
+}
+
+.rule-warning {
+    color: #e65100;
+    margin-top: 10px;
+}
+
+.dark-theme .rule-warning {
+    color: #ffb74d;
+}

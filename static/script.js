@@ -1,5 +1,7 @@
 // Snowflakes effect for winter months
 function initSnowflakes() {
+    if (typeof Snow === 'undefined') return;
+
     const currentMonth = new Date().getMonth();
     if (currentMonth === 11 || currentMonth === 0 || currentMonth === 1) {
         new Snow();
@@ -10,7 +12,14 @@ function initSnowflakes() {
 function initThemeToggle() {
     const themeToggle = document.getElementById('theme-toggle');
     const body = document.body;
-    const currentTheme = localStorage.getItem('theme') || 'light';
+    if (!themeToggle) return;
+
+    let currentTheme = 'light';
+    try {
+        currentTheme = localStorage.getItem('theme') || 'light';
+    } catch(e) {
+        console.log('Error reading theme:', e);
+    }
     
     if (currentTheme === 'dark') {
         body.classList.add('dark-theme');
@@ -22,7 +31,11 @@ function initThemeToggle() {
     themeToggle.addEventListener('click', () => {
         body.classList.toggle('dark-theme');
         const theme = body.classList.contains('dark-theme') ? 'dark' : 'light';
-        localStorage.setItem('theme', theme);
+        try {
+            localStorage.setItem('theme', theme);
+        } catch(e) {
+            console.log('Error saving theme:', e);
+        }
         themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
     });
 }
@@ -55,11 +68,22 @@ function initFormState() {
             port: portInput.value,
             filter: filterSelect.value
         };
-        localStorage.setItem('checkFormState', JSON.stringify(formData));
+        try {
+            localStorage.setItem('checkFormState', JSON.stringify(formData));
+        } catch(e) {
+            console.log('Error saving form state:', e);
+        }
     }
     
     // Restore form state from localStorage
     function restoreFormState() {
+        // Если параметры пришли в адресе, форму уже заполнил сервер.
+        // Сохраненные значения не должны подменять запрос, по которому показан результат
+        if (window.location.search.length > 1) {
+            saveFormState();
+            return;
+        }
+
         try {
             const saved = localStorage.getItem('checkFormState');
             if (saved) {
