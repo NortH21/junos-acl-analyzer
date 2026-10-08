@@ -28,7 +28,7 @@ docker run -d \
 | `TRUSTED_PROXIES` | пусто | Адреса и сети ingress через запятую. Только от них принимается `X-Forwarded-For` для поля `remote_addr` |
 
 #### Запуск в Kubernetes
-Манифестов в репозитории нет, ниже требования к поду.
+Ниже требования к поду. Пример манифестов лежит в [examples/kubernetes](examples/kubernetes): `Deployment` с git-sync, `Service`, `Ingress` и шаблон секрета. Это отправная точка, а не готовая конфигурация: адреса, токен, класс ingress и версию git-sync нужно подставить свои.
 
 **Контейнер сервиса**
 
