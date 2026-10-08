@@ -34,18 +34,10 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	"join": func(items []string, sep string) string {
 		return strings.Join(items, sep)
 	},
-	"hasPrefix": func(s, prefix string) bool {
-		return strings.HasPrefix(s, prefix)
-	},
-	"jiraLink":   jiraLink,
-	"netboxLink": netboxLink,
+	"isJiraQuery": isJiraQuery,
+	"jiraLink":    jiraLink,
+	"netboxLink":  netboxLink,
 }).ParseFS(templatesFS, "templates/*.html"))
-
-// Префикс-лист Juniper
-type PrefixList struct {
-	Name     string
-	Prefixes []string
-}
 
 // Term политики Juniper
 type PolicyTerm struct {
@@ -82,12 +74,6 @@ type PolicyRule struct {
 type AppState struct {
 	PrefixLists map[string][]string
 	PolicyRules []PolicyRule
-}
-
-// Результат поиска
-type SearchResult struct {
-	Query        string
-	MatchedRules []PolicyRule
 }
 
 // Для статистики приложения
@@ -168,26 +154,40 @@ func main() {
 	// Автообновление каждые 2 минут
 	go autoReloadConfigs(2 * time.Minute)
 
-	// Настройка HTTP-обработчиков
-	handler := newHandler()
-
-	log.Printf("✅ Server started on http://localhost:8080") // TODO: Вынести адрес и порт в конфиг
 	log.Println("📊 Prefix lists loaded:", len(getState().PrefixLists))
 	log.Println("📊 Policy rules loaded:", len(getState().PolicyRules))
 
-	if err := http.ListenAndServe(":8080", handler); err != nil { // TODO: Вынести порт в конфиг
-		log.Printf("❌ Server startup error: %v\n", err)
+	// Адрес можно переопределить, например LISTEN_ADDR=127.0.0.1:9090
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":8080"
 	}
+
+	// Таймауты не дают медленным клиентам удерживать соединения бесконечно
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           newHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	log.Printf("✅ Server listening on %s", addr)
+	// Fatal, чтобы при ошибке запуска процесс завершился с ненулевым кодом
+	log.Fatalf("❌ Server error: %v", server.ListenAndServe())
 }
 
 // Собирает HTTP-обработчики приложения
 func newHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", homeHandler)
-	mux.HandleFunc("/search", searchHandler)
-	mux.HandleFunc("/check", checkHandler)
-	mux.HandleFunc("/api/memory", apiMemoryHandler)
-	mux.Handle("/static/", staticHandler())
+	// "{$}" ограничивает главную страницу корнем, остальные пути получают 404.
+	// Приложение только читает данные, поэтому разрешен только GET
+	mux.HandleFunc("GET /{$}", homeHandler)
+	mux.HandleFunc("GET /search", searchHandler)
+	mux.HandleFunc("GET /check", checkHandler)
+	mux.HandleFunc("GET /api/memory", apiMemoryHandler)
+	mux.Handle("GET /static/", staticHandler())
 
 	return securityHeaders(mux)
 }
@@ -254,7 +254,12 @@ func jiraLink(query string) string {
 	if base == "" {
 		base = "https://jira.example.com/browse/"
 	}
-	return base + url.PathEscape(query)
+	return base + url.PathEscape(strings.ToUpper(strings.TrimSpace(query)))
+}
+
+// Похож ли запрос на номер задачи. Регистр не важен: "noc-2273" тоже задача
+func isJiraQuery(query string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "NOC-")
 }
 
 // Ссылка на поиск в Netbox

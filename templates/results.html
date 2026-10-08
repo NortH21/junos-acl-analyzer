@@ -238,7 +238,7 @@
                 <span class="meta-label">Query:</span>
                 <span class="meta-value">
                     {{if .Query}}
-                        {{if hasPrefix .Query "NOC-"}}
+                        {{if isJiraQuery .Query}}
                             <a href="{{jiraLink .Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>
                         {{else}}
                             <a href="{{netboxLink .Query}}" target="_blank" rel="noopener noreferrer">{{.Query}}</a>

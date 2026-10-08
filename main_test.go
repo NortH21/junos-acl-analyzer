@@ -1130,3 +1130,35 @@ func TestPagesFollowCSP(t *testing.T) {
 		}
 	}
 }
+
+func TestRouting(t *testing.T) {
+	loadTestConfig(t, testACL, "filter F {\n    term T1 {\n        then accept;\n    }\n}\n")
+
+	if rec := get(t, "/nope"); rec.Code != http.StatusNotFound {
+		t.Errorf("/nope: status %d, want 404", rec.Code)
+	}
+	if rec := get(t, "/search"); rec.Code != http.StatusSeeOther {
+		t.Errorf("/search without query: status %d, want redirect", rec.Code)
+	}
+
+	for _, target := range []string{"/", "/check", "/search?q=x", "/api/memory"} {
+		rec := httptest.NewRecorder()
+		newHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, target, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s: status %d, want 405", target, rec.Code)
+		}
+	}
+}
+
+func TestJiraLinkIgnoresCase(t *testing.T) {
+	loadTestConfig(t, testACL, "filter F {\n    term NOC-7 {\n        then accept;\n    }\n}\n")
+	t.Setenv("JIRA_URL", "https://jira.example.com/browse/")
+
+	body := get(t, "/search?q=noc-7").Body.String()
+	if !strings.Contains(body, `href="https://jira.example.com/browse/NOC-7"`) {
+		t.Errorf("lowercase task id must link to Jira:\n%s", linkLines(body))
+	}
+	if !strings.Contains(body, "Term: NOC-7") {
+		t.Error("term not found by lowercase task id")
+	}
+}
