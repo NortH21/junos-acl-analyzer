@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -11,9 +12,11 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -21,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -79,6 +83,7 @@ type AppState struct {
 	PrefixLists map[string][]string
 	PolicyRules []PolicyRule
 
+	loadedAt    time.Time    // Когда загружены эти данные, то есть когда они последний раз менялись
 	files       int          // Сколько файлов прочитано
 	fingerprint string       // Хеш содержимого файлов, чтобы отличать реальные изменения
 	problems    loadProblems // Что не удалось разобрать
@@ -129,9 +134,10 @@ type CheckPageData struct {
 	MatchingRules []GroupedRule
 	BlockingRules []GroupedRule // Термы, которые запрещают запрошенный доступ
 	Error         string        // Ошибка в параметрах запроса
+	DataChanged   string        // Когда данные последний раз менялись
 }
 
-var startTime time.Time
+var startTime = time.Now()
 
 // Максимальная длина строки конфига (длинные списки портов и адресов)
 const maxLineSize = 1024 * 1024
@@ -142,6 +148,33 @@ var currentState atomic.Pointer[AppState]
 
 // Не дает перезагрузкам выполняться одновременно
 var reloadMu sync.Mutex
+
+// Каталог с файлами фильтров (переменная FILTERS_DIR). Может быть символической
+// ссылкой, которую git-sync переключает на новую версию репозитория
+var filtersDir = defaultFiltersDir
+
+const (
+	defaultFiltersDir     = "./jcore-filters"
+	defaultReloadInterval = 2 * time.Minute
+	minReloadInterval     = time.Second
+)
+
+// Разбирает RELOAD_INTERVAL: как часто проверять файлы фильтров
+func parseReloadInterval(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultReloadInterval, nil
+	}
+
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q, expected a value like 30s or 2m", value)
+	}
+	if interval < minReloadInterval {
+		return 0, fmt.Errorf("interval %s is too short, the minimum is %s", interval, minReloadInterval)
+	}
+	return interval, nil
+}
 
 func init() {
 	currentState.Store(newAppState())
@@ -160,7 +193,6 @@ func getState() *AppState {
 }
 
 func main() {
-	startTime = time.Now()
 	log := componentLogger("server")
 
 	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
@@ -175,6 +207,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	reloadInterval, err := parseReloadInterval(os.Getenv("RELOAD_INTERVAL"))
+	if err != nil {
+		log.Error("invalid RELOAD_INTERVAL", "error", err.Error())
+		os.Exit(1)
+	}
+
+	if dir := os.Getenv("FILTERS_DIR"); dir != "" {
+		filtersDir = dir
+	}
+
 	// Адрес можно переопределить, например LISTEN_ADDR=127.0.0.1:9090
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -183,30 +225,30 @@ func main() {
 
 	log.Info("server starting",
 		"listen_addr", addr,
+		"filters_dir", filtersDir,
+		"reload_interval_ms", reloadInterval.Milliseconds(),
 		"log_level", levelName(level),
 		"trusted_proxies", len(trustedProxies))
 
-	// Парсинг файлов. Результат и ошибки загрузчик пишет в лог сам
-	_ = loadConfigFiles()
-	// Автообновление каждые 2 минут
-	go autoReloadConfigs(2 * time.Minute)
+	// Kubernetes останавливает под сигналом SIGTERM
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
-	// Таймауты не дают медленным клиентам удерживать соединения бесконечно
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           newHandler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		// Внутренние ошибки net/http тоже должны выходить в JSON
-		ErrorLog: slog.NewLogLogger(componentLogger("http").Handler(), slog.LevelError),
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		// Ненулевой код, чтобы сбой запуска был виден оркестратору
+		log.Error("cannot listen", "error", err.Error())
+		os.Exit(1)
 	}
 
-	// Выходим с ненулевым кодом, чтобы сбой запуска был виден оркестратору
-	err = server.ListenAndServe()
-	log.Error("server stopped", "error", err.Error())
-	os.Exit(1)
+	// Парсинг файлов. Результат и ошибки загрузчик пишет в лог сам
+	_ = loadConfigFiles()
+	go autoReloadConfigs(ctx, reloadInterval)
+
+	if err := serve(ctx, listener, newHandler(), shutdownTimeout); err != nil {
+		log.Error("server stopped", "error", err.Error())
+		os.Exit(1)
+	}
 }
 
 // Собирает HTTP-обработчики приложения
@@ -222,6 +264,7 @@ func newHandler() http.Handler {
 	// Пробы Kubernetes
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("GET /readyz", readyHandler)
+	mux.HandleFunc("GET /metrics", metricsHandler)
 
 	return logRequests(securityHeaders(mux))
 }
@@ -388,6 +431,8 @@ func loadConfigFiles() error {
 		log.Debug("filters unchanged",
 			"files", len(aclFiles)+len(confFiles),
 			"duration_ms", time.Since(start).Milliseconds())
+		reloadsUnchanged.Add(1)
+		lastReloadOK.Store(time.Now().Unix())
 		return nil
 	}
 
@@ -404,6 +449,7 @@ func loadConfigFiles() error {
 			"files", newState.files,
 			"prefix_lists", len(oldState.PrefixLists),
 			"rules", len(oldState.PolicyRules))
+		reloadsFailed.Add(1)
 		return errors.New("no data loaded from any file")
 	}
 
@@ -414,12 +460,21 @@ func loadConfigFiles() error {
 			"error", loadErr.Error(),
 			"prefix_lists", len(oldState.PrefixLists),
 			"rules", len(oldState.PolicyRules))
+		reloadsFailed.Add(1)
 		return loadErr
 	}
 
 	duration := time.Since(start).Milliseconds()
 
+	newState.loadedAt = time.Now()
 	currentState.Store(newState)
+
+	if loadErr != nil {
+		reloadsFailed.Add(1)
+	} else {
+		reloadsChanged.Add(1)
+		lastReloadOK.Store(newState.loadedAt.Unix())
+	}
 
 	msg := fmt.Sprintf("filters loaded: %d prefix lists, %d rules from %d files",
 		len(newState.PrefixLists), len(newState.PolicyRules), newState.files)
@@ -483,13 +538,22 @@ func reportProblems(log *slog.Logger, problems loadProblems) {
 
 // Находит файлы с префикс-листами и с фильтрами
 func findFilterFiles() (aclFiles, confFiles []string) {
+	// Ссылку на каталог разрешаем один раз за перезагрузку. Если git-sync
+	// переключит версию посреди чтения, хеш и разбор все равно пройдут по одной
+	// ревизии, а не по смеси двух
+	dir, err := filepath.EvalSymlinks(filtersDir)
+	if err != nil {
+		// Каталога еще нет: файлов не найдем, загрузчик сообщит об этом сам
+		dir = filtersDir
+	}
+
 	// Шаблоны файлов которые парсим
 	aclPatterns := []string{
-		"./jcore-filters/jcore*.acl.txt",
+		filepath.Join(dir, "jcore*.acl.txt"),
 	}
 
 	confPatterns := []string{
-		"./jcore-filters/jcore*.acl.conf.txt",
+		filepath.Join(dir, "jcore*.acl.conf.txt"),
 	}
 
 	for _, pattern := range aclPatterns {
@@ -506,13 +570,15 @@ func findFilterFiles() (aclFiles, confFiles []string) {
 	return uniqueFiles(aclFiles), uniqueFiles(confFiles)
 }
 
-// Считает хеш имен и содержимого файлов. Файлы читаются потоком, без загрузки в память
+// Считает хеш имен и содержимого файлов. Файлы читаются потоком, без загрузки в память.
+// В хеш идет только имя файла без каталога: у git-sync каталог версии меняется
+// с каждым коммитом, даже если сами фильтры остались прежними
 func fingerprintFiles(fileLists ...[]string) (string, error) {
 	hash := sha256.New()
 
 	for _, files := range fileLists {
 		for _, name := range files {
-			io.WriteString(hash, name+"\n")
+			io.WriteString(hash, filepath.Base(name)+"\n")
 
 			file, err := os.Open(name)
 			if err != nil {
@@ -580,13 +646,18 @@ func uniqueFiles(files []string) []string {
 	return result
 }
 
-// Автоматически перезагружает конфиги по таймеру
-func autoReloadConfigs(interval time.Duration) {
+// Автоматически перезагружает конфиги по таймеру, пока контекст не отменен
+func autoReloadConfigs(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		reloadSafely()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reloadSafely()
+		}
 	}
 }
 
@@ -918,7 +989,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		Stats       AppStats
 		SampleRules []PolicyRule
+		DataChanged string
 	}{
+		DataChanged: dataChangedText(state),
 		Stats: AppStats{
 			PrefixListCount: len(state.PrefixLists),
 			RuleCount:       len(state.PolicyRules),
@@ -946,7 +1019,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := searchRulesWithGrouping(getState(), query)
+	state := getState()
+	results := searchRulesWithGrouping(state, query)
 	addLogString(r, "query", query)
 	addLogAttrs(r, slog.Int("matches", len(results)))
 
@@ -955,7 +1029,9 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		MatchedRules []GroupedRule
 		MemoryUsage  string
 		SearchTime   string
+		DataChanged  string
 	}{
+		DataChanged:  dataChangedText(state),
 		Query:        query,
 		MatchedRules: results,
 		MemoryUsage:  getMemoryUsage(),
@@ -963,6 +1039,15 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderTemplate(w, "results.html", data)
+}
+
+// Когда сервис последний раз загрузил изменившиеся фильтры, для подвала страниц.
+// Если файлы перестанут обновляться, по этой строке видно, что данные старые
+func dataChangedText(state *AppState) string {
+	if state.loadedAt.IsZero() {
+		return "not loaded"
+	}
+	return state.loadedAt.Format("2006-01-02 15:04 MST")
 }
 
 // Возвращает информацию об использовании памяти
@@ -1049,11 +1134,12 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	state := getState()
 
 	data := CheckPageData{
-		Src:        src,
-		Dst:        dst,
-		Port:       port,
-		Filter:     filter,
-		AllFilters: getAllFilterNames(state),
+		Src:         src,
+		Dst:         dst,
+		Port:        port,
+		Filter:      filter,
+		AllFilters:  getAllFilterNames(state),
+		DataChanged: dataChangedText(state),
 	}
 
 	// Если все поля пустые, просто показываем форму

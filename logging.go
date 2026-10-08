@@ -260,6 +260,10 @@ func isQuietRequest(r *http.Request) bool {
 	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 		return true
 	}
+	// Опрос метрик раз в несколько секунд
+	if r.URL.Path == "/metrics" {
+		return true
+	}
 	return strings.HasPrefix(r.UserAgent(), "kube-probe/")
 }
 
@@ -267,7 +271,8 @@ func isQuietRequest(r *http.Request) bool {
 // оказаться адрес, поэтому в msg идет шаблон маршрута, а путь - в поле path
 func routeName(r *http.Request) string {
 	if r.Pattern != "" {
-		return r.Pattern
+		// "{$}" в шаблоне означает точное совпадение пути
+		return strings.Replace(r.Pattern, "{$}", "", 1)
 	}
 	return r.Method + " (no route)"
 }
@@ -311,6 +316,9 @@ func logRequests(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
+			duration := time.Since(start)
+			recordRequest(routeName(r), status, duration)
+
 			if status < http.StatusBadRequest && isQuietRequest(r) {
 				return
 			}
@@ -323,7 +331,6 @@ func logRequests(next http.Handler) http.Handler {
 				level = slog.LevelWarn
 			}
 
-			duration := time.Since(start)
 			attrs := []slog.Attr{
 				slog.String("request_id", id),
 				slog.String("remote_addr", clientAddr(r)),
