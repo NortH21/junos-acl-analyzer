@@ -96,7 +96,22 @@ func (a addrSet) match(query netip.Prefix, hasQuery bool) matchLevel {
 	return matchNone
 }
 
-// Проверяет пересечение запроса с любым префиксом условия (для поиска)
+// Проверяет, записан ли в условии именно этот префикс (для поиска по сети с маской)
+func (a addrSet) hasPrefix(query netip.Prefix) bool {
+	for _, net := range a.nets {
+		if net == query {
+			return true
+		}
+	}
+	for _, net := range a.except {
+		if net == query {
+			return true
+		}
+	}
+	return false
+}
+
+// Проверяет пересечение запроса с любым префиксом условия (для поиска по адресу)
 func (a addrSet) overlaps(query netip.Prefix) bool {
 	for _, net := range a.nets {
 		if net.Overlaps(query) {

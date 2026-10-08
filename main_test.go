@@ -633,18 +633,30 @@ func TestSearch(t *testing.T) {
 		term  string
 		want  bool
 	}{
+		// Адрес без маски находит сети, в которые он входит
 		{"10.1.1.5", "TO-DB", true},
-		{"10.1.1.5/32", "TO-DB", true},
+		{"10.2.2.200", "TO-DB", true},
+		{"10.3.3.3", "TO-DB", false},
+		{"192.168.50.7", "BARE-HOST", true},
+		{"172.16.5.1", "WITH-EXCEPT", true}, // except тоже часть правила
+
+		// Запрос с маской находит только правила с этим же префиксом
+		{"10.1.1.5/32", "TO-DB", false},
+		{"10.1.1.0/24", "TO-DB", true},
 		{"10.2.2.0/24", "TO-DB", true},
-		{"10.2.0.0/16", "TO-DB", true}, // сеть находит префиксы внутри себя
-		{"10.3.0.0/16", "TO-DB", false},
+		{"10.2.2.0/25", "TO-DB", false},
+		{"10.2.0.0/16", "TO-DB", false},
+		{"192.168.50.7/32", "BARE-HOST", true}, // адрес в правиле записан без маски
+		{"192.168.50.8/32", "BARE-HOST", false},
+		{"172.16.5.0/24", "WITH-EXCEPT", true},
+		{"172.16.0.0/12", "WITH-EXCEPT", true},
+		{"172.16.5.1/32", "WITH-EXCEPT", false},
+
 		{"0.1.1.5", "TO-DB", false},
 		{"10.1.", "TO-DB", true},
 		{"0.1.", "TO-DB", false}, // раньше находилось подстрокой
 		{"web", "TO-DB", true},
 		{"to-db", "TO-DB", true},
-		{"172.16.5.1", "WITH-EXCEPT", true}, // except тоже часть правила
-		{"192.168.50.7", "BARE-HOST", true},
 	}
 	for _, tt := range tests {
 		rules := searchRulesWithGrouping(getState(), tt.query)

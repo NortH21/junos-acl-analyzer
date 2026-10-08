@@ -323,9 +323,13 @@ func searchRulesWithGrouping(state *AppState, query string) []GroupedRule {
 func isSearchMatch(rule PolicyRule, query string) bool {
 	query = strings.ToLower(strings.TrimSpace(query))
 
-	// Адрес или сеть ищем по пересечению: 10.1.1.5 находит 10.1.1.0/24,
-	// а 10.1.0.0/16 находит все префиксы внутри
 	if prefix, ok := parsePrefix(query); ok {
+		// Запрос с маской ищет правила, где записан именно этот префикс:
+		// 10.1.1.5/32 не находит 10.1.1.0/24
+		if strings.Contains(query, "/") {
+			return rule.srcAddrs.hasPrefix(prefix) || rule.dstAddrs.hasPrefix(prefix)
+		}
+		// Адрес без маски ищет все сети, в которые он входит
 		return rule.srcAddrs.overlaps(prefix) || rule.dstAddrs.overlaps(prefix)
 	}
 
