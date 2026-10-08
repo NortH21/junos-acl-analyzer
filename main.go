@@ -618,6 +618,8 @@ func parseThenSection(line string, term *PolicyTerm) {
 
 // Разворачивает префикс-листы в конкретные префиксы
 func resolvePrefixLists() {
+	missing := make(map[string]bool)
+
 	for i, rule := range appState.PolicyRules {
 		var resolvedSourcePrefixes []string
 		var resolvedDestinationPrefixes []string
@@ -629,6 +631,8 @@ func resolvePrefixLists() {
 		for _, listName := range rule.Term.SourcePrefixLists {
 			if prefixes, exists := appState.PrefixLists[listName]; exists {
 				resolvedSourcePrefixes = append(resolvedSourcePrefixes, prefixes...)
+			} else {
+				missing[listName] = true
 			}
 		}
 
@@ -639,11 +643,22 @@ func resolvePrefixLists() {
 		for _, listName := range rule.Term.DestinationPrefixLists {
 			if prefixes, exists := appState.PrefixLists[listName]; exists {
 				resolvedDestinationPrefixes = append(resolvedDestinationPrefixes, prefixes...)
+			} else {
+				missing[listName] = true
 			}
 		}
 
 		appState.PolicyRules[i].ResolvedSourcePrefixes = resolvedSourcePrefixes
 		appState.PolicyRules[i].ResolvedDestinationPrefixes = resolvedDestinationPrefixes
+	}
+
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for name := range missing {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		log.Printf("⚠️ Prefix lists referenced but not defined (%d): %v", len(names), names)
 	}
 }
 
@@ -951,8 +966,9 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
 		// Если source не указан, считаем что совпадает с любым source
 		srcMatch = true
 	} else {
-		// Если в правиле нет source префиксов, значит правило не ограничивает source
-		if len(rule.ResolvedSourcePrefixes) == 0 {
+		// Если в терме нет условий по source, значит правило не ограничивает source.
+		// Пустой или ненайденный префикс-лист - это условие, под которое ничего не попадает
+		if len(rule.Term.SourceAddresses) == 0 && len(rule.Term.SourcePrefixLists) == 0 {
 			srcMatch = true
 		} else {
 			// Проверяем совпадение по source
@@ -975,8 +991,8 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
 		// Если destination не указан, считаем что совпадает с любым destination
 		dstMatch = true
 	} else {
-		// Если в правиле нет destination префиксов, значит правило не ограничивает destination
-		if len(rule.ResolvedDestinationPrefixes) == 0 {
+		// Если в терме нет условий по destination, значит правило не ограничивает destination
+		if len(rule.Term.DestinationAddresses) == 0 && len(rule.Term.DestinationPrefixLists) == 0 {
 			dstMatch = true
 		} else {
 			// Проверяем совпадение по destination

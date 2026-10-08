@@ -138,3 +138,51 @@ func TestDiscardTermDoesNotGrantAccess(t *testing.T) {
 		t.Errorf("discard term reported as allowing access: %+v", rules)
 	}
 }
+
+func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
+	loadTestConfig(t, testACL, `filter TEST-IN {
+    term MISSING-SRC {
+        from {
+            source-prefix-list {
+                NO-SUCH-LIST;
+            }
+            destination-prefix-list {
+                DB;
+            }
+        }
+        then accept;
+    }
+    term MISSING-DST {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+            destination-prefix-list {
+                NO-SUCH-LIST;
+            }
+        }
+        then accept;
+    }
+    term ANY-SRC {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+        }
+        then accept;
+    }
+}
+`)
+
+	rules := checkAccess("8.8.8.8", "10.2.2.2", "")
+	if hasTerm(rules, "MISSING-SRC") {
+		t.Error("term with undefined source prefix-list matched an arbitrary source")
+	}
+	if !hasTerm(rules, "ANY-SRC") {
+		t.Error("term without source conditions must match any source")
+	}
+
+	if rules := checkAccess("10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
+		t.Error("term with undefined destination prefix-list matched an arbitrary destination")
+	}
+}
