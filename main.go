@@ -56,6 +56,9 @@ type PolicyTerm struct {
 	DestinationPorts       []string
 	Action                 string
 	Counter                string
+	// Условия "from", которые анализатор не проверяет. Терм с такими условиями
+	// совпадает с запросом только частично
+	OtherConditions []string
 }
 
 // Полное правило
@@ -115,6 +118,9 @@ type CheckPageData struct {
 }
 
 var startTime time.Time
+
+// Максимальная длина строки конфига (длинные списки портов и адресов)
+const maxLineSize = 1024 * 1024
 
 // Текущее состояние. Обработчики читают его без блокировок, а перезагрузка
 // собирает новое состояние отдельно и подменяет указатель целиком
@@ -443,6 +449,7 @@ func parsePrefixLists(state *AppState, filename string) error {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -452,15 +459,16 @@ func parsePrefixLists(state *AppState, filename string) error {
 			continue
 		}
 
-		// Ищем строки с префикс-листами
-		if strings.Contains(line, "prefix-list") {
-			// Пример: set policy-options prefix-list OPR-WEB-INTERNAL 10.237.241.0/24
-			parts := strings.Fields(line)
-			if len(parts) >= 5 {
-				listName := parts[3]
-				prefix := parts[4]
+		// Пример: set policy-options prefix-list OPR-WEB-INTERNAL 10.237.241.0/24
+		// Строки с source-prefix-list и подобными сюда попадать не должны
+		parts := strings.Fields(line)
+		for i := 1; i+2 < len(parts); i++ {
+			if parts[i-1] == "policy-options" && parts[i] == "prefix-list" {
+				listName := parts[i+1]
+				prefix := parts[i+2]
 
 				state.PrefixLists[listName] = append(state.PrefixLists[listName], prefix)
+				break
 			}
 		}
 	}
@@ -468,7 +476,8 @@ func parsePrefixLists(state *AppState, filename string) error {
 	return scanner.Err()
 }
 
-// Парсит файл с политиками
+// Парсит файл с политиками.
+// Вложенность отслеживается стеком блоков: filter -> term -> from/then -> блок условий
 func parsePolicyRules(state *AppState, filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -477,209 +486,141 @@ func parsePolicyRules(state *AppState, filename string) error {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	var stack []string
 	var currentFilter string
 	var currentTerm *PolicyTerm
-	var inFilter, inTerm bool
-	var currentSection string
-	var blockDepth int
-	var inSourceAddressBlock, inDestinationAddressBlock bool
-	var inSourcePrefixListBlock, inDestinationPrefixListBlock bool
+
+	// Сохраняет разобранный term
+	flushTerm := func() {
+		if currentTerm != nil {
+			state.PolicyRules = append(state.PolicyRules, PolicyRule{
+				FilterName: currentFilter,
+				Term:       *currentTerm,
+			})
+			currentTerm = nil
+		}
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// Пропускаем пустые строки
-		if line == "" {
+		// Пропускаем пустые строки и комментарии
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "/*") {
 			continue
 		}
 
-		// Начало фильтра
-		if strings.HasPrefix(line, "filter ") {
-			filterName := strings.TrimPrefix(line, "filter ")
-			filterName = strings.TrimSuffix(filterName, " {")
-			currentFilter = filterName
-			inFilter = true
-			blockDepth = 1
+		opensBlock := strings.HasSuffix(line, "{")
+		head := strings.TrimSpace(strings.TrimSuffix(line, "{"))
+
+		// Вне фильтра ищем только его начало
+		if len(stack) == 0 {
+			name := strings.TrimSpace(strings.TrimPrefix(head, "filter "))
+			if opensBlock && strings.HasPrefix(head, "filter ") && name != "" {
+				currentFilter = name
+				stack = append(stack, "filter")
+			}
 			continue
 		}
 
-		if !inFilter {
-			continue
-		}
-
-		// Отслеживаем глубину вложенности
-		if strings.HasSuffix(line, "{") {
-			blockDepth++
-		}
 		if strings.HasPrefix(line, "}") {
-			blockDepth--
-			if blockDepth == 0 {
-				// Конец фильтра
-				inFilter = false
+			closed := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if closed == "term" || len(stack) == 0 {
+				flushTerm()
+			}
+			if len(stack) == 0 {
 				currentFilter = ""
 			}
-
-			// Закрытие блоков внутри term
-			if inTerm {
-				if inSourceAddressBlock {
-					inSourceAddressBlock = false
-					continue
-				}
-				if inDestinationAddressBlock {
-					inDestinationAddressBlock = false
-					continue
-				}
-				if inSourcePrefixListBlock {
-					inSourcePrefixListBlock = false
-					continue
-				}
-				if inDestinationPrefixListBlock {
-					inDestinationPrefixListBlock = false
-					continue
-				}
-				if currentSection != "" {
-					currentSection = ""
-				} else if blockDepth > 0 {
-					// Конец term
-					if currentTerm != nil {
-						state.PolicyRules = append(state.PolicyRules, PolicyRule{
-							FilterName: currentFilter,
-							Term:       *currentTerm,
-						})
-						currentTerm = nil
-					}
-					inTerm = false
-				}
-			}
 			continue
 		}
 
-		// Начало term
-		if strings.HasPrefix(line, "term ") && inFilter {
-			if currentTerm != nil {
-				state.PolicyRules = append(state.PolicyRules, PolicyRule{
-					FilterName: currentFilter,
-					Term:       *currentTerm,
-				})
-			}
-			termName := strings.TrimPrefix(line, "term ")
-			termName = strings.TrimSuffix(termName, " {")
+		inTerm := len(stack) >= 2 && stack[1] == "term" && currentTerm != nil
+
+		switch {
+		case len(stack) == 1 && opensBlock && strings.HasPrefix(head, "term "):
 			currentTerm = &PolicyTerm{
-				Name:   termName,
+				Name:   strings.TrimSpace(strings.TrimPrefix(head, "term ")),
 				Action: "accept", // по умолчанию
 			}
-			inTerm = true
-			continue
-		}
+			stack = append(stack, "term")
 
-		if !inTerm {
-			continue
-		}
+		case opensBlock:
+			// from, then, блоки условий, а также всё незнакомое (например, "inactive: term X")
+			stack = append(stack, head)
 
-		// Разделы (from, then)
-		if line == "from {" {
-			currentSection = "from"
-			continue
-		} else if line == "then {" {
-			currentSection = "then"
-			continue
-		} else if currentSection == "" && strings.HasPrefix(line, "then ") && strings.HasSuffix(line, ";") {
-			// Однострочная форма: "then discard;"
-			if currentTerm != nil {
+		case !inTerm:
+			// Строки вне term нас не интересуют
+
+		case len(stack) == 2:
+			// Однострочные формы: "then discard;" и "from protocol tcp;"
+			if strings.HasPrefix(line, "then ") {
 				parseThenSection(strings.TrimPrefix(line, "then "), currentTerm)
+			} else if strings.HasPrefix(line, "from ") {
+				parseFromCondition(strings.TrimPrefix(line, "from "), currentTerm)
 			}
-			continue
-		}
 
-		// Парсинг содержимого разделов
-		if currentSection == "from" && currentTerm != nil {
-			parseFromSection(line, currentTerm, &inSourceAddressBlock, &inDestinationAddressBlock,
-				&inSourcePrefixListBlock, &inDestinationPrefixListBlock)
-		} else if currentSection == "then" && currentTerm != nil {
+		case len(stack) == 3 && stack[2] == "from":
+			parseFromCondition(line, currentTerm)
+
+		case len(stack) == 3 && stack[2] == "then":
 			parseThenSection(line, currentTerm)
+
+		case len(stack) == 4 && stack[2] == "from":
+			parseFromBlockItem(stack[3], line, currentTerm)
 		}
 	}
 
-	// Добавляем последний term, если есть
-	if currentTerm != nil && inFilter {
-		state.PolicyRules = append(state.PolicyRules, PolicyRule{
-			FilterName: currentFilter,
-			Term:       *currentTerm,
-		})
-	}
+	// Добавляем последний term, если файл оборван
+	flushTerm()
 
 	return scanner.Err()
 }
 
-// Парсит секцию "from"
-func parseFromSection(line string, term *PolicyTerm,
-	inSourceAddressBlock, inDestinationAddressBlock *bool,
-	inSourcePrefixListBlock, inDestinationPrefixListBlock *bool) {
-
-	// Обработка source-address
-	if strings.HasPrefix(line, "source-address {") {
-		*inSourceAddressBlock = true
-		return
-	}
-	if *inSourceAddressBlock && strings.HasSuffix(line, ";") {
-		addr := strings.TrimSuffix(line, ";")
-		term.SourceAddresses = append(term.SourceAddresses, strings.TrimSpace(addr))
+// Парсит однострочное условие секции "from"
+func parseFromCondition(line string, term *PolicyTerm) {
+	condition := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ";"))
+	if condition == "" {
 		return
 	}
 
-	// Обработка destination-address
-	if strings.HasPrefix(line, "destination-address {") {
-		*inDestinationAddressBlock = true
-		return
+	name, value, _ := strings.Cut(condition, " ")
+	value = strings.TrimSpace(value)
+
+	switch name {
+	case "protocol":
+		term.Protocol = value
+	case "source-port":
+		term.SourcePorts = append(term.SourcePorts, parsePortRange(value)...)
+	case "destination-port":
+		term.DestinationPorts = append(term.DestinationPorts, parsePortRange(value)...)
+	case "source-address", "destination-address", "source-prefix-list", "destination-prefix-list":
+		parseFromBlockItem(name, value, term)
+	default:
+		// Условие, которое мы не умеем проверять (tcp-established, icmp-type, port ...)
+		term.OtherConditions = append(term.OtherConditions, condition)
 	}
-	if *inDestinationAddressBlock && strings.HasSuffix(line, ";") {
-		addr := strings.TrimSuffix(line, ";")
-		term.DestinationAddresses = append(term.DestinationAddresses, strings.TrimSpace(addr))
+}
+
+// Парсит элемент блока внутри "from", например адрес из source-address { ... }
+func parseFromBlockItem(block, line string, term *PolicyTerm) {
+	item := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ";"))
+	if item == "" {
 		return
 	}
 
-	// Обработка source-prefix-list
-	if strings.HasPrefix(line, "source-prefix-list {") {
-		*inSourcePrefixListBlock = true
-		return
-	}
-	if *inSourcePrefixListBlock && strings.HasSuffix(line, ";") {
-		listName := strings.TrimSuffix(line, ";")
-		term.SourcePrefixLists = append(term.SourcePrefixLists, strings.TrimSpace(listName))
-		return
-	}
-
-	// Обработка destination-prefix-list
-	if strings.HasPrefix(line, "destination-prefix-list {") {
-		*inDestinationPrefixListBlock = true
-		return
-	}
-	if *inDestinationPrefixListBlock && strings.HasSuffix(line, ";") {
-		listName := strings.TrimSuffix(line, ";")
-		term.DestinationPrefixLists = append(term.DestinationPrefixLists, strings.TrimSpace(listName))
-		return
-	}
-
-	// Обработка protocol
-	if strings.HasPrefix(line, "protocol ") {
-		term.Protocol = strings.TrimSuffix(strings.TrimPrefix(line, "protocol "), ";")
-		return
-	}
-
-	// Обработка source-port
-	if strings.HasPrefix(line, "source-port ") {
-		ports := strings.TrimSuffix(strings.TrimPrefix(line, "source-port "), ";")
-		term.SourcePorts = append(term.SourcePorts, ports)
-		return
-	}
-
-	// Обработка destination-port
-	if strings.HasPrefix(line, "destination-port ") {
-		ports := strings.TrimSuffix(strings.TrimPrefix(line, "destination-port "), ";")
-		// Парсим порты из строки с диапазонами
-		parsedPorts := parsePortRange(ports)
-		term.DestinationPorts = append(term.DestinationPorts, parsedPorts...)
-		return
+	switch block {
+	case "source-address":
+		term.SourceAddresses = append(term.SourceAddresses, item)
+	case "destination-address":
+		term.DestinationAddresses = append(term.DestinationAddresses, item)
+	case "source-prefix-list":
+		term.SourcePrefixLists = append(term.SourcePrefixLists, item)
+	case "destination-prefix-list":
+		term.DestinationPrefixLists = append(term.DestinationPrefixLists, item)
+	default:
+		// address { ... }, prefix-list { ... } и прочие блоки
+		term.OtherConditions = append(term.OtherConditions, block+" "+item)
 	}
 }
 

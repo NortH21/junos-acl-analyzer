@@ -46,6 +46,18 @@ func termAction(t *testing.T, name string) string {
 	return ""
 }
 
+// Возвращает разобранный term по имени
+func findTerm(t *testing.T, name string) PolicyTerm {
+	t.Helper()
+	for _, rule := range getState().PolicyRules {
+		if rule.Term.Name == name {
+			return rule.Term
+		}
+	}
+	t.Fatalf("term %q not found", name)
+	return PolicyTerm{}
+}
+
 func hasTerm(rules []GroupedRule, name string) bool {
 	for _, rule := range rules {
 		if rule.TermName == name {
@@ -387,5 +399,128 @@ func TestFailedReloadKeepsOldState(t *testing.T) {
 	}
 	if got := len(getState().PolicyRules); got != 1 {
 		t.Errorf("partial state published after failed reload: %d rules", got)
+	}
+}
+
+func TestParseFilterStructure(t *testing.T) {
+	loadTestConfig(t, testACL, `firewall {
+    family inet {
+        filter FIRST {
+            /* комментарий Junos */
+            term FULL {
+                from {
+                    source-address {
+                        10.0.0.0/8;
+                        10.9.0.0/16 except;
+                    }
+                    destination-address {
+                        192.168.1.1/32;
+                    }
+                    source-prefix-list {
+                        WEB;
+                    }
+                    destination-prefix-list {
+                        DB;
+                    }
+                    address {
+                        172.16.0.0/12;
+                    }
+                    protocol tcp;
+                    source-port 1024-65535;
+                    destination-port [ 80 443 8080-8090 ];
+                    tcp-established;
+                }
+                then {
+                    policer P1;
+                    count c1;
+                    accept;
+                }
+            }
+            inactive: term DISABLED {
+                from {
+                    source-address {
+                        1.1.1.1/32;
+                    }
+                }
+                then accept;
+            }
+            term INLINE {
+                from protocol udp;
+                then discard;
+            }
+        }
+        filter SECOND {
+            term ONLY {
+                then accept;
+            }
+        }
+    }
+}
+interfaces {
+    ge-0/0/0 {
+        unit 0 {
+            family inet {
+                filter {
+                    input FIRST;
+                }
+            }
+        }
+    }
+}
+`)
+
+	rules := getState().PolicyRules
+	var got []string
+	for _, rule := range rules {
+		got = append(got, rule.FilterName+"/"+rule.Term.Name)
+	}
+	want := []string{"FIRST/FULL", "FIRST/INLINE", "SECOND/ONLY"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("parsed terms %v, want %v", got, want)
+	}
+
+	full := findTerm(t, "FULL")
+	checks := map[string][2]string{
+		"source addresses":      {strings.Join(full.SourceAddresses, ","), "10.0.0.0/8,10.9.0.0/16 except"},
+		"destination addresses": {strings.Join(full.DestinationAddresses, ","), "192.168.1.1/32"},
+		"source lists":          {strings.Join(full.SourcePrefixLists, ","), "WEB"},
+		"destination lists":     {strings.Join(full.DestinationPrefixLists, ","), "DB"},
+		"protocol":              {full.Protocol, "tcp"},
+		"source ports":          {strings.Join(full.SourcePorts, ","), "1024-65535"},
+		"destination ports":     {strings.Join(full.DestinationPorts, ","), "80,443,8080-8090"},
+		"other conditions":      {strings.Join(full.OtherConditions, ","), "address 172.16.0.0/12,tcp-established"},
+		"action":                {full.Action, "accept"},
+		"counter":               {full.Counter, "c1"},
+	}
+	for name, check := range checks {
+		if check[0] != check[1] {
+			t.Errorf("%s = %q, want %q", name, check[0], check[1])
+		}
+	}
+
+	inline := findTerm(t, "INLINE")
+	if inline.Protocol != "udp" || inline.Action != "discard" {
+		t.Errorf("inline term parsed as protocol=%q action=%q", inline.Protocol, inline.Action)
+	}
+}
+
+func TestParsePrefixListLines(t *testing.T) {
+	loadTestConfig(t, `# комментарий
+set policy-options prefix-list WEB 10.1.1.0/24
+set policy-options prefix-list WEB 10.1.2.0/24
+set groups G1 policy-options prefix-list GROUPED 10.3.3.0/24
+set firewall family inet filter F term T from source-prefix-list WEB
+set policy-options prefix-list EMPTY
+`, "filter F {\n    term T1 {\n        then accept;\n    }\n}\n")
+
+	lists := getState().PrefixLists
+	if got := strings.Join(lists["WEB"], ","); got != "10.1.1.0/24,10.1.2.0/24" {
+		t.Errorf("WEB = %q", got)
+	}
+	if got := strings.Join(lists["GROUPED"], ","); got != "10.3.3.0/24" {
+		t.Errorf("GROUPED = %q", got)
+	}
+	if len(lists) != 2 {
+		t.Errorf("unexpected prefix lists parsed: %v", lists)
 	}
 }
