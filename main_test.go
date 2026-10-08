@@ -1,8 +1,11 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -184,5 +187,127 @@ func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
 
 	if rules := checkAccess("10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
 		t.Error("term with undefined destination prefix-list matched an arbitrary destination")
+	}
+}
+
+// Выполняет GET-запрос к приложению и возвращает ответ
+func get(t *testing.T, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	newHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	return rec
+}
+
+func TestUserInputIsEscaped(t *testing.T) {
+	loadTestConfig(t, testACL, `filter TEST-IN {
+    term T1 {
+        then accept;
+    }
+}
+`)
+
+	const payload = `"><script>alert(1)</script>`
+	const encoded = "%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+
+	targets := []string{
+		"/search?q=" + encoded,
+		"/check?src=" + encoded,
+		"/check?dst=" + encoded,
+		"/check?port=" + encoded,
+		"/check?src=10.1.1.1&filter=" + encoded,
+	}
+	for _, target := range targets {
+		rec := get(t, target)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d", target, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), payload) || strings.Contains(rec.Body.String(), "<script>alert(1)") {
+			t.Errorf("%s: user input rendered without escaping", target)
+		}
+	}
+}
+
+func TestExternalLinksAreEscaped(t *testing.T) {
+	loadTestConfig(t, testACL, `filter TEST-IN {
+    term T1 {
+        then accept;
+    }
+}
+`)
+	t.Setenv("NETBOX_URL", "https://netbox.example.com/search/?q=")
+	t.Setenv("JIRA_URL", "https://jira.example.com/browse/")
+
+	body := get(t, "/search?q=10.1.1.0%2F24%26x%3D%22y").Body.String()
+	if !strings.Contains(body, `href="https://netbox.example.com/search/?q=10.1.1.0%2F24%26x%3D%22y"`) {
+		t.Errorf("netbox link is not URL-escaped:\n%s", linkLines(body))
+	}
+
+	body = get(t, "/search?q=NOC-1").Body.String()
+	if !strings.Contains(body, `href="https://jira.example.com/browse/NOC-1"`) {
+		t.Errorf("jira link missing:\n%s", linkLines(body))
+	}
+}
+
+func linkLines(body string) string {
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "href=\"http") {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	loadTestConfig(t, testACL, "filter F {\n    term T1 {\n        then accept;\n    }\n}\n")
+
+	headers := get(t, "/").Header()
+	want := map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	}
+	for name, value := range want {
+		if got := headers.Get(name); got != value {
+			t.Errorf("%s = %q, want %q", name, got, value)
+		}
+	}
+}
+
+func TestPagesRender(t *testing.T) {
+	loadTestConfig(t, testACL, `filter TEST-IN {
+    term NOC-1 {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+            destination-prefix-list {
+                DB;
+            }
+            protocol tcp;
+            destination-port [ 443 8080-8090 ];
+        }
+        then accept;
+    }
+}
+`)
+
+	pages := map[string]string{
+		"/":                    "Junos ACL Analyzer",
+		"/check":               `<option value="TEST-IN"`,
+		"/check?src=10.1.1.5":  "Term: NOC-1",
+		"/search?q=WEB":        "Term: NOC-1",
+		"/search?q=10.2.2.200": "10.2.2.0/24",
+		"/search?q=nothing":    "Nothing found",
+		"/api/memory":          `"rules": 1`,
+	}
+	for target, marker := range pages {
+		rec := get(t, target)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d", target, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), marker) {
+			t.Errorf("%s: %q not found in response", target, marker)
+		}
 	}
 }

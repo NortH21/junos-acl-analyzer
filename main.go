@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"embed"
 	"fmt"
+	"html/template"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,9 +17,24 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 )
+
+//go:embed templates/*.html
+var templatesFS embed.FS
+
+// html/template экранирует пользовательский ввод с учетом контекста (HTML, атрибуты, URL)
+var templates = template.Must(template.New("").Funcs(template.FuncMap{
+	"add": func(a, b int) int { return a + b },
+	"join": func(items []string, sep string) string {
+		return strings.Join(items, sep)
+	},
+	"hasPrefix": func(s, prefix string) bool {
+		return strings.HasPrefix(s, prefix)
+	},
+	"jiraLink":   jiraLink,
+	"netboxLink": netboxLink,
+}).ParseFS(templatesFS, "templates/*.html"))
 
 // Префикс-лист Juniper
 type PrefixList struct {
@@ -116,18 +135,72 @@ func main() {
 	resolvePrefixLists()
 
 	// Настройка HTTP-обработчиков
-	http.HandleFunc("/", homeHandler)
-	http.HandleFunc("/search", searchHandler)
-	http.HandleFunc("/check", checkHandler)
-	http.HandleFunc("/api/memory", apiMemoryHandler)
+	handler := newHandler()
 
 	log.Printf("✅ Server started on http://localhost:8080") // TODO: Вынести адрес и порт в конфиг
 	log.Println("📊 Prefix lists loaded:", len(appState.PrefixLists))
 	log.Println("📊 Policy rules loaded:", len(appState.PolicyRules))
 
-	if err := http.ListenAndServe(":8080", nil); err != nil { // TODO: Вынести порт в конфиг
+	if err := http.ListenAndServe(":8080", handler); err != nil { // TODO: Вынести порт в конфиг
 		log.Printf("❌ Server startup error: %v\n", err)
 	}
+}
+
+// Собирает HTTP-обработчики приложения
+func newHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", homeHandler)
+	mux.HandleFunc("/search", searchHandler)
+	mux.HandleFunc("/check", checkHandler)
+	mux.HandleFunc("/api/memory", apiMemoryHandler)
+
+	return securityHeaders(mux)
+}
+
+// Добавляет защитные заголовки ко всем ответам
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		// В строке запроса внутренние адреса, не отдаем их сторонним хостам
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Рендерит шаблон в буфер, чтобы при ошибке не отдать половину страницы
+func renderTemplate(w http.ResponseWriter, name string, data any) {
+	var buf bytes.Buffer
+	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {
+		log.Printf("❌ Template %s error: %v", name, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := buf.WriteTo(w); err != nil {
+		log.Printf("⚠️ Response write error: %v", err)
+	}
+}
+
+// Ссылка на задачу в Jira. Запрос экранируется здесь: html/template не знает,
+// что базовый URL из окружения заканчивается путем или строкой запроса
+func jiraLink(query string) string {
+	base := os.Getenv("JIRA_URL")
+	if base == "" {
+		base = "https://jira.example.com/browse/"
+	}
+	return base + url.PathEscape(query)
+}
+
+// Ссылка на поиск в Netbox
+func netboxLink(query string) string {
+	base := os.Getenv("NETBOX_URL")
+	if base == "" {
+		base = "https://netbox.example.com/search/?q="
+	}
+	return base + url.QueryEscape(query)
 }
 
 // Ищет правила и группирует их
@@ -692,16 +765,6 @@ func matchesCIDR(query, cidr string) bool {
 
 // Обработчики HTTP
 func homeHandler(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.New("index.html").Funcs(template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-	})
-
-	tmpl, err := tmpl.ParseFiles("templates/index.html")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	data := struct {
 		Stats       AppStats
 		SampleRules []PolicyRule
@@ -722,7 +785,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		data.SampleRules = appState.PolicyRules
 	}
 
-	tmpl.Execute(w, data)
+	renderTemplate(w, "index.html", data)
 }
 
 // Обработчик поиска
@@ -734,35 +797,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := searchRulesWithGrouping(query)
-
-	// Получаем URL из переменных окружения
-	jiraURL := os.Getenv("JIRA_URL")
-	if jiraURL == "" {
-		jiraURL = "https://jira.example.com/browse/"
-	}
-
-	netboxURL := os.Getenv("NETBOX_URL")
-	if netboxURL == "" {
-		netboxURL = "https://netbox.example.com/search/?q="
-	}
-
-	tmpl := template.New("results.html").Funcs(template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-		"join": func(items []string, sep string) string {
-			return strings.Join(items, sep)
-		},
-		"hasPrefix": func(s, prefix string) bool {
-			return strings.HasPrefix(s, prefix)
-		},
-		"getJiraURL":   func() string { return jiraURL },
-		"getNetboxURL": func() string { return netboxURL },
-	})
-
-	tmpl, err := tmpl.ParseFiles("templates/results.html")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	data := struct {
 		Query        string
@@ -776,7 +810,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		SearchTime:   time.Now().Format("15:04:05"),
 	}
 
-	tmpl.Execute(w, data)
+	renderTemplate(w, "results.html", data)
 }
 
 // Возвращает информацию об использовании памяти
@@ -837,19 +871,6 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	filter := r.URL.Query().Get("filter")
 
-	tmpl := template.New("check.html").Funcs(template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-		"join": func(items []string, sep string) string {
-			return strings.Join(items, sep)
-		},
-	})
-
-	tmpl, err := tmpl.ParseFiles("templates/check.html")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	data := CheckPageData{
 		Src:        src,
 		Dst:        dst,
@@ -859,7 +880,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Если все поля пустые, просто показываем форму
 	if src == "" && dst == "" && port == "" {
-		tmpl.Execute(w, data)
+		renderTemplate(w, "check.html", data)
 		return
 	}
 
@@ -888,7 +909,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		data.AccessGranted = true
 	}
 
-	tmpl.Execute(w, data)
+	renderTemplate(w, "check.html", data)
 }
 
 // Проверяет доступ по всем параметрам и возвращает сгруппированные правила
