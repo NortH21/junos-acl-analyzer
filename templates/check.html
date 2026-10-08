@@ -168,6 +168,14 @@
             background: #f3e5f5;
             color: #7b1fa2;
         }
+        .tag-deny {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .rule-warning {
+            color: #e65100;
+            margin-top: 10px;
+        }
         .no-rules {
             text-align: center;
             padding: 30px;
@@ -275,6 +283,15 @@
             <p>Checking the rules...</p>
         </div>
         
+        {{if .Error}}
+            <div class="result-card">
+                <div class="result-header access-denied">
+                    ⚠️ INVALID REQUEST
+                </div>
+                <p>{{.Error}}</p>
+            </div>
+        {{end}}
+
         {{if .Checked}}
             <div class="result-card">
                 {{if .AccessGranted}}
@@ -286,14 +303,18 @@
                     <div class="result-header access-partial">
                         ⚠️ ACCESS PARTIALLY OPEN
                     </div>
-                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}}, but there are restrictions:</p>
+                    <p>Found {{len .MatchingRules}} rule{{if ne (len .MatchingRules) 1}}s{{end}} that allow access, but deny terms earlier in the filter may block part of the traffic:</p>
                 {{else}}
                     <div class="result-header access-denied">
                         ❌ ACCESS DENIED
                     </div>
+                    {{if .BlockingRules}}
+                    <p>The traffic is blocked by {{len .BlockingRules}} deny term{{if ne (len .BlockingRules) 1}}s{{end}} shown below.</p>
+                    {{else}}
                     <p>Found no rules that allow access with the specified parameters.</p>
+                    {{end}}
                 {{end}}
-                
+
                 {{if .Src}}
                     <div class="rule-detail"><strong>Source:</strong> {{.Src}}</div>
                 {{end}}
@@ -307,95 +328,16 @@
                     <div class="rule-detail"><strong>Filter:</strong> {{.Filter}}</div>
                 {{end}}
             </div>
-            
+
             {{if .MatchingRules}}
                 {{range .MatchingRules}}
-                <div class="rule-card">
-                    <div class="rule-name">
-                        Term: {{.TermName}}
-                        <span style="float: right; font-size: 14px; color: #666;">
-                            {{len .Filters}} filter{{if ne (len .Filters) 1}}s{{end}}
-                        </span>
-                    </div>
-                    
-                    {{if .SourcePrefixes}}
-                    <div class="rule-detail">
-                        <strong>Source prefixes:</strong>
-                        {{range .SourcePrefixes}}
-                            <span class="tag tag-source">{{.}}</span>
-                        {{end}}
-                    </div>
-                    {{end}}
-                    
-                    {{if .SourcePrefixLists}}
-                    <div class="rule-detail">
-                        <strong>Source prefix-lists:</strong>
-                        {{range .SourcePrefixLists}}
-                            <span class="tag tag-source">{{.}}</span>
-                        {{end}}
-                    </div>
-                    {{end}}
-                    
-                    {{if .DestinationPrefixes}}
-                    <div class="rule-detail">
-                        <strong>Destination prefixes:</strong>
-                        {{range .DestinationPrefixes}}
-                            <span class="tag tag-destination">{{.}}</span>
-                        {{end}}
-                    </div>
-                    {{end}}
-                    
-                    {{if .DestinationPrefixLists}}
-                    <div class="rule-detail">
-                        <strong>Destination prefix-lists:</strong>
-                        {{range .DestinationPrefixLists}}
-                            <span class="tag tag-destination">{{.}}</span>
-                        {{end}}
-                    </div>
-                    {{end}}
-                    
-                    {{if .DestinationPorts}}
-                    <div class="rule-detail">
-                        <strong>Ports:</strong>
-                        {{range .DestinationPorts}}
-                            <span class="tag tag-port">{{.}}</span>
-                        {{end}}
-                    </div>
-                    {{else if not $.Port}}
-                    <div class="rule-detail">
-                        <strong>Ports:</strong> <span class="tag tag-port">ALL</span>
-                    </div>
-                    {{end}}
-                    
-                    {{if .Protocol}}
-                    <div class="rule-detail">
-                        <strong>Protocol:</strong> <span class="tag tag-protocol">{{.Protocol}}</span>
-                    </div>
-                    {{end}}
-                    
-                    <div class="rule-detail">
-                        <strong>Action:</strong> 
-                        {{if eq .Action "accept"}}
-                            <span style="color: #4CAF50; font-weight: bold;">✓ Accept</span>
-                        {{else if eq .Action "discard"}}
-                            <span style="color: #f44336; font-weight: bold;">✗ Discard</span>
-                        {{else}}
-                            <span style="color: #f44336; font-weight: bold;">✗ Reject</span>
-                        {{end}}
-                    </div>
-                    
-                    {{if .Filters}}
-                    <div class="rule-detail" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd;">
-                        <strong>Used in filters:</strong>
-                        {{range $index, $filter := .Filters}}
-                            {{if $index}}, {{end}}
-                            <code style="background: #e0e0e0; padding: 2px 6px; border-radius: 3px;">{{$filter}}</code>
-                        {{end}}
-                    </div>
-                    {{end}}
-                </div>
+                    {{template "check-rule-card" .}}
                 {{end}}
-            {{else if .Checked}}
+            {{else if .BlockingRules}}
+                {{range .BlockingRules}}
+                    {{template "check-rule-card" .}}
+                {{end}}
+            {{else}}
                 <div class="no-rules">
                     <p>🤔 No matching rules were found in the ACL.</p>
                 </div>
@@ -455,3 +397,116 @@
     </script>
 </body>
 </html>
+{{define "check-rule-card"}}
+                <div class="rule-card">
+                    <div class="rule-name">
+                        Term: {{.TermName}}
+                        <span style="float: right; font-size: 14px; color: #666;">
+                            {{len .Filters}} filter{{if ne (len .Filters) 1}}s{{end}}
+                        </span>
+                    </div>
+                    
+                    {{if .SourcePrefixes}}
+                    <div class="rule-detail">
+                        <strong>Source prefixes:</strong>
+                        {{range .SourcePrefixes}}
+                            <span class="tag tag-source">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+                    
+                    {{if .SourcePrefixLists}}
+                    <div class="rule-detail">
+                        <strong>Source prefix-lists:</strong>
+                        {{range .SourcePrefixLists}}
+                            <span class="tag tag-source">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+                    
+                    {{if .DestinationPrefixes}}
+                    <div class="rule-detail">
+                        <strong>Destination prefixes:</strong>
+                        {{range .DestinationPrefixes}}
+                            <span class="tag tag-destination">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+                    
+                    {{if .DestinationPrefixLists}}
+                    <div class="rule-detail">
+                        <strong>Destination prefix-lists:</strong>
+                        {{range .DestinationPrefixLists}}
+                            <span class="tag tag-destination">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+                    
+                    {{if .DestinationPorts}}
+                    <div class="rule-detail">
+                        <strong>Ports:</strong>
+                        {{range .DestinationPorts}}
+                            <span class="tag tag-port">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{else}}
+                    <div class="rule-detail">
+                        <strong>Ports:</strong> <span class="tag tag-port">ALL</span>
+                    </div>
+                    {{end}}
+                    
+                    {{if .Protocol}}
+                    <div class="rule-detail">
+                        <strong>Protocol:</strong> <span class="tag tag-protocol">{{.Protocol}}</span>
+                    </div>
+                    {{end}}
+                    
+                    {{if .SourcePorts}}
+                    <div class="rule-detail">
+                        <strong>Source ports:</strong>
+                        {{range .SourcePorts}}
+                            <span class="tag tag-port">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
+                    {{if .OtherConditions}}
+                    <div class="rule-detail">
+                        <strong>Other conditions:</strong>
+                        {{range .OtherConditions}}
+                            <span class="tag tag-protocol">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
+                    <div class="rule-detail">
+                        <strong>Action:</strong> 
+                        {{if eq .Action "accept"}}
+                            <span style="color: #4CAF50; font-weight: bold;">✓ Accept</span>
+                        {{else if eq .Action "discard"}}
+                            <span style="color: #f44336; font-weight: bold;">✗ Discard</span>
+                        {{else}}
+                            <span style="color: #f44336; font-weight: bold;">✗ Reject</span>
+                        {{end}}
+                    </div>
+                    
+                    {{if .ShadowedBy}}
+                    <div class="rule-detail rule-warning">
+                        ⚠️ <strong>May be blocked earlier in the filter by:</strong>
+                        {{range .ShadowedBy}}
+                            <span class="tag tag-deny">{{.}}</span>
+                        {{end}}
+                    </div>
+                    {{end}}
+
+                    {{if .Filters}}
+                    <div class="rule-detail" style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd;">
+                        <strong>Used in filters:</strong>
+                        {{range $index, $filter := .Filters}}
+                            {{if $index}}, {{end}}
+                            <code style="background: #e0e0e0; padding: 2px 6px; border-radius: 3px;">{{$filter}}</code>
+                        {{end}}
+                    </div>
+                    {{end}}
+                </div>
+{{end}}

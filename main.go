@@ -61,6 +61,7 @@ type PolicyTerm struct {
 
 // Полное правило
 type PolicyRule struct {
+	Source                      string // Файл, из которого прочитан фильтр
 	FilterName                  string
 	Term                        PolicyTerm
 	ResolvedSourcePrefixes      []string // Разрешенные префиксы из префикс-листов
@@ -103,8 +104,10 @@ type GroupedRule struct {
 	Protocol               string
 	SourcePorts            []string
 	DestinationPorts       []string
+	OtherConditions        []string // Условия, которые анализатор не проверяет
 	Action                 string
 	Filters                []string // Список фильтров, где встречается это правило
+	ShadowedBy             []string // Запрещающие термы выше по фильтру, которые могут перехватить трафик
 }
 
 // Данные для страницы проверки
@@ -118,6 +121,8 @@ type CheckPageData struct {
 	AccessGranted bool
 	AccessPartial bool
 	MatchingRules []GroupedRule
+	BlockingRules []GroupedRule // Термы, которые запрещают запрошенный доступ
+	Error         string        // Ошибка в параметрах запроса
 }
 
 var startTime time.Time
@@ -195,6 +200,10 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // Рендерит шаблон в буфер, чтобы при ошибке не отдать половину страницы
 func renderTemplate(w http.ResponseWriter, name string, data any) {
+	renderTemplateStatus(w, http.StatusOK, name, data)
+}
+
+func renderTemplateStatus(w http.ResponseWriter, status int, name string, data any) {
 	var buf bytes.Buffer
 	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {
 		log.Printf("❌ Template %s error: %v", name, err)
@@ -203,6 +212,7 @@ func renderTemplate(w http.ResponseWriter, name string, data any) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if _, err := buf.WriteTo(w); err != nil {
 		log.Printf("⚠️ Response write error: %v", err)
 	}
@@ -229,61 +239,15 @@ func netboxLink(query string) string {
 
 // Ищет правила и группирует их
 func searchRulesWithGrouping(state *AppState, query string) []GroupedRule {
-	groupedRules := make(map[string]*GroupedRule)
+	var matches []matchedRule
 
-	for _, rule := range state.PolicyRules {
-		if !isSearchMatch(rule, query) {
-			continue
-		}
-
-		// Создаем ключ для группировки
-		key := fmt.Sprintf("%s|%v|%v|%s|%v|%v|%s",
-			rule.Term.Name,
-			sortedSlice(rule.Term.SourcePrefixLists),
-			sortedSlice(rule.Term.DestinationPrefixLists),
-			rule.Term.Protocol,
-			sortedSlice(rule.Term.SourcePorts),
-			sortedSlice(rule.Term.DestinationPorts),
-			rule.Term.Action)
-
-		if groupedRule, exists := groupedRules[key]; !exists {
-			groupedRules[key] = &GroupedRule{
-				TermName:               rule.Term.Name,
-				SourcePrefixes:         uniqueStrings(rule.ResolvedSourcePrefixes),
-				DestinationPrefixes:    uniqueStrings(rule.ResolvedDestinationPrefixes),
-				SourcePrefixLists:      uniqueStrings(rule.Term.SourcePrefixLists),
-				DestinationPrefixLists: uniqueStrings(rule.Term.DestinationPrefixLists),
-				Protocol:               rule.Term.Protocol,
-				SourcePorts:            uniqueStrings(rule.Term.SourcePorts),
-				DestinationPorts:       uniqueStrings(rule.Term.DestinationPorts),
-				Action:                 rule.Term.Action,
-				Filters:                []string{rule.FilterName},
-			}
-		} else {
-			// Добавляем фильтр, если его еще нет
-			if !containsString(groupedRule.Filters, rule.FilterName) {
-				groupedRule.Filters = append(groupedRule.Filters, rule.FilterName)
-			}
-
-			// Добавляем уникальные префиксы
-			groupedRule.SourcePrefixes = appendUnique(groupedRule.SourcePrefixes, rule.ResolvedSourcePrefixes...)
-			groupedRule.DestinationPrefixes = appendUnique(groupedRule.DestinationPrefixes, rule.ResolvedDestinationPrefixes...)
+	for i := range state.PolicyRules {
+		if isSearchMatch(state.PolicyRules[i], query) {
+			matches = append(matches, matchedRule{rule: &state.PolicyRules[i]})
 		}
 	}
 
-	// Конвертируем map в slice и сортируем
-	result := make([]GroupedRule, 0, len(groupedRules))
-	for _, rule := range groupedRules {
-		sort.Strings(rule.Filters)
-		result = append(result, *rule)
-	}
-
-	// Сортируем по имени term
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].TermName < result[j].TermName
-	})
-
-	return result
+	return groupRules(matches)
 }
 
 // Проверяет совпадает ли правило с поисковым запросом
@@ -504,6 +468,7 @@ func parsePolicyRules(state *AppState, filename string) error {
 	flushTerm := func() {
 		if currentTerm != nil {
 			state.PolicyRules = append(state.PolicyRules, PolicyRule{
+				Source:     filepath.Base(filename),
 				FilterName: currentFilter,
 				Term:       *currentTerm,
 			})
@@ -870,6 +835,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		Src:        src,
 		Dst:        dst,
 		Port:       port,
+		Filter:     filter,
 		AllFilters: getAllFilterNames(state),
 	}
 
@@ -879,127 +845,32 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ищем правила
-	rules := checkAccess(state, src, dst, port)
-
-	// Фильтруем по выбранному фильтру, если указан
-	if filter != "" {
-		filteredRules := []GroupedRule{}
-		for _, rule := range rules {
-			for _, f := range rule.Filters {
-				if f == filter {
-					filteredRules = append(filteredRules, rule)
-					break
-				}
-			}
-		}
-		rules = filteredRules
+	query, err := parseAccessQuery(src, dst, port)
+	if err != nil {
+		data.Error = err.Error()
+		renderTemplateStatus(w, http.StatusBadRequest, "check.html", data)
+		return
 	}
+
+	// Ищем правила в выбранном фильтре или во всех
+	result := checkAccess(state, query, filter)
 
 	data.Checked = true
-	data.MatchingRules = rules
+	data.MatchingRules = result.Allowed
+	data.BlockingRules = result.Blocked
 
-	// Определяем статус доступа
-	if len(rules) > 0 {
-		data.AccessGranted = true
+	// Доступ открыт, если хотя бы один разрешающий терм ничем не перекрыт.
+	// Если перед каждым есть запрещающий терм, который может сработать раньше,
+	// доступ открыт только частично
+	for _, rule := range result.Allowed {
+		if len(rule.ShadowedBy) == 0 {
+			data.AccessGranted = true
+			break
+		}
 	}
+	data.AccessPartial = len(result.Allowed) > 0 && !data.AccessGranted
 
 	renderTemplate(w, "check.html", data)
-}
-
-// Проверяет доступ по всем параметрам и возвращает сгруппированные правила
-func checkAccess(state *AppState, src, dst, port string) []GroupedRule {
-	groupedRules := make(map[string]*GroupedRule)
-
-	for _, rule := range state.PolicyRules {
-		// Проверяем совпадение правила с запросом
-		if !isRuleMatch(rule, src, dst, port) {
-			continue
-		}
-
-		// Создаем ключ для группировки (на основе основных параметров term)
-		key := fmt.Sprintf("%s|%v|%v|%s|%v|%v|%s",
-			rule.Term.Name,
-			sortedSlice(rule.Term.SourcePrefixLists),
-			sortedSlice(rule.Term.DestinationPrefixLists),
-			rule.Term.Protocol,
-			sortedSlice(rule.Term.SourcePorts),
-			sortedSlice(rule.Term.DestinationPorts),
-			rule.Term.Action)
-
-		if groupedRule, exists := groupedRules[key]; !exists {
-			// Создаем новое сгруппированное правило
-			groupedRules[key] = &GroupedRule{
-				TermName:               rule.Term.Name,
-				SourcePrefixes:         uniqueStrings(rule.ResolvedSourcePrefixes),
-				DestinationPrefixes:    uniqueStrings(rule.ResolvedDestinationPrefixes),
-				SourcePrefixLists:      uniqueStrings(rule.Term.SourcePrefixLists),
-				DestinationPrefixLists: uniqueStrings(rule.Term.DestinationPrefixLists),
-				Protocol:               rule.Term.Protocol,
-				SourcePorts:            uniqueStrings(rule.Term.SourcePorts),
-				DestinationPorts:       uniqueStrings(rule.Term.DestinationPorts),
-				Action:                 rule.Term.Action,
-				Filters:                []string{rule.FilterName},
-			}
-		} else {
-			// Добавляем фильтр, если его еще нет
-			if !containsString(groupedRule.Filters, rule.FilterName) {
-				groupedRule.Filters = append(groupedRule.Filters, rule.FilterName)
-			}
-
-			// Добавляем уникальные префиксы
-			groupedRule.SourcePrefixes = appendUnique(groupedRule.SourcePrefixes, rule.ResolvedSourcePrefixes...)
-			groupedRule.DestinationPrefixes = appendUnique(groupedRule.DestinationPrefixes, rule.ResolvedDestinationPrefixes...)
-		}
-	}
-
-	// Конвертируем map в slice и сортируем по имени term
-	result := make([]GroupedRule, 0, len(groupedRules))
-	for _, rule := range groupedRules {
-		// Сортируем фильтры для красивого отображения
-		sort.Strings(rule.Filters)
-		result = append(result, *rule)
-	}
-
-	// Сортируем результат по имени term
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].TermName < result[j].TermName
-	})
-
-	return result
-}
-
-// Проверяет совпадает ли правило с запросом
-func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
-	// Проверяем action
-	if rule.Term.Action != "accept" {
-		return false
-	}
-
-	// Проверяем source. Нераспознанный адрес не подходит ни под одно правило
-	srcPrefix, srcOK := parsePrefix(src)
-	if src != "" && !srcOK {
-		return false
-	}
-	if rule.srcAddrs.match(srcPrefix, src != "") == matchNone {
-		return false
-	}
-
-	// Проверяем destination
-	dstPrefix, dstOK := parsePrefix(dst)
-	if dst != "" && !dstOK {
-		return false
-	}
-	if rule.dstAddrs.match(dstPrefix, dst != "") == matchNone {
-		return false
-	}
-
-	// Проверяем порт. Нераспознанный порт не подходит ни под одно правило
-	portQuery, portOK := parsePortSpec(port)
-	if port != "" && !portOK {
-		return false
-	}
-	return rule.dstPorts.match(portQuery, port != "") != matchNone
 }
 
 // Вспомогательные функции
@@ -1031,24 +902,6 @@ func containsString(slice []string, item string) bool {
 		}
 	}
 	return false
-}
-
-func appendUnique(existing []string, newItems ...string) []string {
-	result := existing
-	seen := make(map[string]bool)
-
-	for _, item := range existing {
-		seen[item] = true
-	}
-
-	for _, item := range newItems {
-		if !seen[item] {
-			seen[item] = true
-			result = append(result, item)
-		}
-	}
-
-	return result
 }
 
 // Парсит порты из строки с диапазонами

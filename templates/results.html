@@ -341,6 +341,15 @@
                 </div>
                 {{end}}
                 
+                {{if $rule.OtherConditions}}
+                <div class="rule-section">
+                    <div class="section-title">Other conditions:</div>
+                    {{range $rule.OtherConditions}}
+                        <span class="tag tag-protocol">{{.}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+
                 <div class="rule-section">
                     <div class="section-title">Action:</div>
                     {{if eq $rule.Action "accept"}}

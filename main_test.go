@@ -14,17 +14,25 @@ import (
 // Пишет конфиги во временную директорию и загружает их так же, как приложение
 func loadTestConfig(t *testing.T, acl, conf string) {
 	t.Helper()
+	loadTestFiles(t, map[string]string{
+		"jcore1.acl.txt":      acl,
+		"jcore1.acl.conf.txt": conf,
+	})
+}
+
+// То же для произвольного набора файлов в jcore-filters
+func loadTestFiles(t *testing.T, files map[string]string) {
+	t.Helper()
 
 	dir := t.TempDir()
 	filters := filepath.Join(dir, "jcore-filters")
 	if err := os.Mkdir(filters, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(filters, "jcore1.acl.txt"), []byte(acl), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(filters, "jcore1.acl.conf.txt"), []byte(conf), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(filters, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	t.Chdir(dir)
@@ -56,6 +64,25 @@ func findTerm(t *testing.T, name string) PolicyTerm {
 	}
 	t.Fatalf("term %q not found", name)
 	return PolicyTerm{}
+}
+
+func mustQuery(t *testing.T, src, dst, port string) accessQuery {
+	t.Helper()
+	query, err := parseAccessQuery(src, dst, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return query
+}
+
+// Возвращает разрешающие термы для запроса. Некорректный запрос не разрешает ничего
+func allowedRules(t *testing.T, src, dst, port string) []GroupedRule {
+	t.Helper()
+	query, err := parseAccessQuery(src, dst, port)
+	if err != nil {
+		return nil
+	}
+	return checkAccess(getState(), query, "").Allowed
 }
 
 func hasTerm(rules []GroupedRule, name string) bool {
@@ -151,7 +178,7 @@ func TestDiscardTermDoesNotGrantAccess(t *testing.T) {
 }
 `)
 
-	if rules := checkAccess(getState(), "10.1.1.5", "", ""); len(rules) != 0 {
+	if rules := allowedRules(t, "10.1.1.5", "", ""); len(rules) != 0 {
 		t.Errorf("discard term reported as allowing access: %+v", rules)
 	}
 }
@@ -191,7 +218,7 @@ func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
 }
 `)
 
-	rules := checkAccess(getState(), "8.8.8.8", "10.2.2.2", "")
+	rules := allowedRules(t, "8.8.8.8", "10.2.2.2", "")
 	if hasTerm(rules, "MISSING-SRC") {
 		t.Error("term with undefined source prefix-list matched an arbitrary source")
 	}
@@ -199,7 +226,7 @@ func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
 		t.Error("term without source conditions must match any source")
 	}
 
-	if rules := checkAccess(getState(), "10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
+	if rules := allowedRules(t, "10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
 		t.Error("term with undefined destination prefix-list matched an arbitrary destination")
 	}
 }
@@ -232,7 +259,8 @@ func TestUserInputIsEscaped(t *testing.T) {
 	}
 	for _, target := range targets {
 		rec := get(t, target)
-		if rec.Code != http.StatusOK {
+		// Некорректный адрес или порт возвращает 400 вместе с формой
+		if rec.Code != http.StatusOK && rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status %d", target, rec.Code)
 		}
 		if strings.Contains(rec.Body.String(), payload) || strings.Contains(rec.Body.String(), "<script>alert(1)") {
@@ -364,10 +392,10 @@ func TestReloadIsAtomic(t *testing.T) {
 			t.Fatalf("reader saw %d rules during reload, want %d", got, terms)
 		}
 		// Все термы ограничены по source, поэтому посторонний адрес не должен подойти
-		if rules := checkAccess(state, "8.8.8.8", "", ""); len(rules) != 0 {
+		if rules := checkAccess(state, mustQuery(t, "8.8.8.8", "", ""), "").Allowed; len(rules) != 0 {
 			t.Fatalf("reader saw %d unresolved rules during reload", len(rules))
 		}
-		if rules := checkAccess(state, "10.0.7.9", "", ""); len(rules) != 1 {
+		if rules := checkAccess(state, mustQuery(t, "10.0.7.9", "", ""), "").Allowed; len(rules) != 1 {
 			t.Fatalf("reader saw %d matching rules during reload, want 1", len(rules))
 		}
 	}
@@ -587,7 +615,7 @@ func TestCheckAccessAddresses(t *testing.T) {
 		{"8.8.8.8", "", "BAD-PREFIX", false},
 	}
 	for _, tt := range tests {
-		rules := checkAccess(getState(), tt.src, tt.dst, "")
+		rules := allowedRules(t, tt.src, tt.dst, "")
 		if got := hasTerm(rules, tt.term); got != tt.want {
 			t.Errorf("src=%q dst=%q: term %s matched = %v, want %v", tt.src, tt.dst, tt.term, got, tt.want)
 		}
@@ -667,9 +695,385 @@ func TestCheckAccessPorts(t *testing.T) {
 		{"70000", "SINGLE-PORT", false},
 	}
 	for _, tt := range tests {
-		rules := checkAccess(getState(), "", "10.2.2.2", tt.port)
+		rules := allowedRules(t, "", "10.2.2.2", tt.port)
 		if got := hasTerm(rules, tt.term); got != tt.want {
 			t.Errorf("port %q: term %s matched = %v, want %v", tt.port, tt.term, got, tt.want)
 		}
+	}
+}
+
+// Имена термов через запятую
+func termNames(rules []GroupedRule) string {
+	var names []string
+	for _, rule := range rules {
+		names = append(names, rule.TermName)
+	}
+	return strings.Join(names, ",")
+}
+
+func findRule(t *testing.T, rules []GroupedRule, name string) GroupedRule {
+	t.Helper()
+	for _, rule := range rules {
+		if rule.TermName == name {
+			return rule
+		}
+	}
+	t.Fatalf("term %q not found in %q", name, termNames(rules))
+	return GroupedRule{}
+}
+
+const orderTestConf = `filter EDGE-IN {
+    term COUNT-ALL {
+        then {
+            count all;
+            next term;
+        }
+    }
+    term DENY-BAD-HOST {
+        from {
+            source-address {
+                10.1.1.66/32;
+            }
+        }
+        then discard;
+    }
+    term DENY-DB-TELNET {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+            protocol tcp;
+            destination-port telnet;
+        }
+        then reject;
+    }
+    term DENY-UDP-TO-DB {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+            protocol udp;
+        }
+        then discard;
+    }
+    term DENY-OTHER-NET {
+        from {
+            destination-address {
+                172.16.0.0/12;
+            }
+        }
+        then discard;
+    }
+    term ALLOW-WEB-TO-DB {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+            destination-prefix-list {
+                DB;
+            }
+            protocol tcp;
+        }
+        then accept;
+    }
+    term ALLOW-WEB-ANY {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then accept;
+    }
+    term DENY-REST {
+        then discard;
+    }
+    term ALLOW-AFTER-DENY {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then accept;
+    }
+}
+`
+
+func TestFirstMatchOrder(t *testing.T) {
+	loadTestConfig(t, testACL, orderTestConf)
+
+	t.Run("deny term above blocks the host", func(t *testing.T) {
+		result := checkAccess(getState(), mustQuery(t, "10.1.1.66", "10.2.2.2", "443"), "")
+		if len(result.Allowed) != 0 {
+			t.Errorf("allowed = %q, want none", termNames(result.Allowed))
+		}
+		if got := termNames(result.Blocked); got != "DENY-BAD-HOST" {
+			t.Errorf("blocked = %q, want DENY-BAD-HOST", got)
+		}
+	})
+
+	t.Run("accept term stops evaluation", func(t *testing.T) {
+		// ALLOW-WEB-TO-DB покрывает запрос частично (protocol), ALLOW-WEB-ANY целиком.
+		// До DENY-REST и ALLOW-AFTER-DENY трафик не доходит
+		result := checkAccess(getState(), mustQuery(t, "10.1.1.5", "10.2.2.2", "443"), "")
+		if got := termNames(result.Allowed); got != "ALLOW-WEB-ANY,ALLOW-WEB-TO-DB" {
+			t.Errorf("allowed = %q", got)
+		}
+		if len(result.Blocked) != 0 {
+			t.Errorf("blocked = %q, want none", termNames(result.Blocked))
+		}
+	})
+
+	t.Run("deny on another protocol is reported only for overlapping terms", func(t *testing.T) {
+		result := checkAccess(getState(), mustQuery(t, "10.1.1.5", "10.2.2.2", "443"), "")
+
+		// tcp-терм не пересекается с запретом udp
+		if rule := findRule(t, result.Allowed, "ALLOW-WEB-TO-DB"); len(rule.ShadowedBy) != 0 {
+			t.Errorf("ALLOW-WEB-TO-DB shadowed by %v", rule.ShadowedBy)
+		}
+		// терм без протокола может потерять udp
+		rule := findRule(t, result.Allowed, "ALLOW-WEB-ANY")
+		if got := strings.Join(rule.ShadowedBy, ","); got != "DENY-UDP-TO-DB" {
+			t.Errorf("ALLOW-WEB-ANY shadowed by %q, want DENY-UDP-TO-DB", got)
+		}
+	})
+
+	t.Run("partial deny on the queried port", func(t *testing.T) {
+		result := checkAccess(getState(), mustQuery(t, "10.1.1.5", "10.2.2.2", "23"), "")
+		rule := findRule(t, result.Allowed, "ALLOW-WEB-TO-DB")
+		if got := strings.Join(rule.ShadowedBy, ","); got != "DENY-DB-TELNET" {
+			t.Errorf("shadowed by %q, want DENY-DB-TELNET", got)
+		}
+	})
+
+	t.Run("unrelated destination deny is not reported", func(t *testing.T) {
+		result := checkAccess(getState(), mustQuery(t, "10.1.1.5", "", ""), "")
+		rule := findRule(t, result.Allowed, "ALLOW-WEB-TO-DB")
+		if containsString(rule.ShadowedBy, "DENY-OTHER-NET") {
+			t.Errorf("shadowed by %v", rule.ShadowedBy)
+		}
+		// а терм без условия по destination этот запрет задевает
+		rule = findRule(t, result.Allowed, "ALLOW-WEB-ANY")
+		if !containsString(rule.ShadowedBy, "DENY-OTHER-NET") {
+			t.Errorf("ALLOW-WEB-ANY shadowed by %v, want DENY-OTHER-NET included", rule.ShadowedBy)
+		}
+	})
+
+	t.Run("implicit and explicit deny for unknown source", func(t *testing.T) {
+		result := checkAccess(getState(), mustQuery(t, "8.8.8.8", "10.2.2.2", "443"), "")
+		if len(result.Allowed) != 0 {
+			t.Errorf("allowed = %q, want none", termNames(result.Allowed))
+		}
+		if got := termNames(result.Blocked); got != "DENY-REST" {
+			t.Errorf("blocked = %q, want DENY-REST", got)
+		}
+	})
+}
+
+func TestFiltersAreEvaluatedSeparately(t *testing.T) {
+	denyThenAllow := `filter SHARED {
+    term STOP {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then discard;
+    }
+    term PASS {
+        then accept;
+    }
+}
+`
+	allowOnly := `filter SHARED {
+    term PASS {
+        then accept;
+    }
+}
+filter OTHER {
+    term LOCAL {
+        from {
+            source-address {
+                10.1.1.5/32;
+            }
+        }
+        then accept;
+    }
+}
+`
+	loadTestFiles(t, map[string]string{
+		"jcore1.acl.txt":      testACL,
+		"jcore1.acl.conf.txt": denyThenAllow,
+		"jcore2.acl.conf.txt": allowOnly,
+	})
+
+	// Одноименный фильтр на другом устройстве не наследует запрет с первого
+	result := checkAccess(getState(), mustQuery(t, "10.1.1.5", "", ""), "")
+	if got := termNames(result.Allowed); got != "LOCAL,PASS" {
+		t.Errorf("allowed = %q, want LOCAL,PASS", got)
+	}
+
+	result = checkAccess(getState(), mustQuery(t, "10.1.1.5", "", ""), "OTHER")
+	if got := termNames(result.Allowed); got != "LOCAL" {
+		t.Errorf("filter OTHER: allowed = %q, want LOCAL", got)
+	}
+
+	result = checkAccess(getState(), mustQuery(t, "10.1.1.5", "", ""), "NO-SUCH-FILTER")
+	if len(result.Allowed) != 0 || len(result.Blocked) != 0 {
+		t.Errorf("unknown filter returned rules: %+v", result)
+	}
+}
+
+func TestGroupingKeepsDifferentTermsApart(t *testing.T) {
+	loadTestConfig(t, testACL, `filter A {
+    term SAME-NAME {
+        from {
+            source-address {
+                10.1.1.0/24;
+            }
+        }
+        then accept;
+    }
+    term IDENTICAL {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then accept;
+    }
+}
+filter B {
+    term SAME-NAME {
+        from {
+            source-address {
+                10.9.9.0/24;
+            }
+        }
+        then accept;
+    }
+    term IDENTICAL {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then accept;
+    }
+}
+`)
+
+	rules := searchRulesWithGrouping(getState(), "SAME-NAME")
+	if len(rules) != 2 {
+		t.Fatalf("got %d cards for SAME-NAME, want 2", len(rules))
+	}
+	for _, rule := range rules {
+		if len(rule.SourcePrefixes) != 1 || len(rule.Filters) != 1 {
+			t.Errorf("card mixes filters: prefixes=%v filters=%v", rule.SourcePrefixes, rule.Filters)
+		}
+	}
+
+	rules = searchRulesWithGrouping(getState(), "IDENTICAL")
+	if len(rules) != 1 || strings.Join(rules[0].Filters, ",") != "A,B" {
+		t.Errorf("identical terms must be grouped: %+v", rules)
+	}
+}
+
+func TestCheckPage(t *testing.T) {
+	loadTestConfig(t, testACL, orderTestConf)
+
+	tests := []struct {
+		target string
+		status int
+		want   []string
+		absent []string
+	}{
+		{
+			target: "/check?src=10.1.1.5&dst=10.2.2.2&port=443&filter=EDGE-IN",
+			status: http.StatusOK,
+			want: []string{
+				"ACCESS OPEN",
+				"Term: ALLOW-WEB-TO-DB",
+				`<option value="EDGE-IN" selected>`,
+				"<strong>Filter:</strong> EDGE-IN",
+			},
+			absent: []string{"ACCESS DENIED", "PARTIALLY"},
+		},
+		{
+			target: "/check?src=10.1.1.66&dst=10.2.2.2",
+			status: http.StatusOK,
+			want:   []string{"ACCESS DENIED", "Term: DENY-BAD-HOST", "✗ Discard"},
+			absent: []string{"ACCESS OPEN"},
+		},
+		{
+			target: "/check?src=8.8.8.8&filter=NO-SUCH-FILTER",
+			status: http.StatusOK,
+			want:   []string{"ACCESS DENIED", "No matching rules were found"},
+		},
+		{
+			target: "/check?src=10.1.1.5&dst=10.2.2.2&port=99999",
+			status: http.StatusBadRequest,
+			want:   []string{"INVALID REQUEST", "invalid port or port range"},
+			absent: []string{"ACCESS OPEN", "ACCESS DENIED"},
+		},
+		{
+			target: "/check?src=10.1.1.300",
+			status: http.StatusBadRequest,
+			want:   []string{"invalid source address or network"},
+		},
+	}
+	for _, tt := range tests {
+		rec := get(t, tt.target)
+		body := rec.Body.String()
+		if rec.Code != tt.status {
+			t.Errorf("%s: status %d, want %d", tt.target, rec.Code, tt.status)
+		}
+		for _, want := range tt.want {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: %q not found", tt.target, want)
+			}
+		}
+		for _, absent := range tt.absent {
+			if strings.Contains(body, absent) {
+				t.Errorf("%s: unexpected %q", tt.target, absent)
+			}
+		}
+	}
+}
+
+func TestCheckPagePartialAccess(t *testing.T) {
+	loadTestConfig(t, testACL, `filter EDGE-IN {
+    term DENY-DB-TELNET {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+            destination-port telnet;
+        }
+        then discard;
+    }
+    term ALLOW-WEB {
+        from {
+            source-prefix-list {
+                WEB;
+            }
+        }
+        then accept;
+    }
+}
+`)
+
+	body := get(t, "/check?src=10.1.1.5&dst=10.2.2.2").Body.String()
+	for _, want := range []string{"ACCESS PARTIALLY OPEN", "May be blocked earlier in the filter by", "DENY-DB-TELNET"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q not found", want)
+		}
+	}
+
+	// Для конкретного порта запрет либо срабатывает целиком, либо не мешает
+	if body := get(t, "/check?src=10.1.1.5&dst=10.2.2.2&port=23").Body.String(); !strings.Contains(body, "ACCESS DENIED") {
+		t.Error("telnet must be denied")
+	}
+	if body := get(t, "/check?src=10.1.1.5&dst=10.2.2.2&port=443").Body.String(); !strings.Contains(body, "ACCESS OPEN") {
+		t.Error("https must be open")
 	}
 }
