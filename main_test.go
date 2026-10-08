@@ -622,3 +622,54 @@ func TestSearch(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckAccessPorts(t *testing.T) {
+	loadTestConfig(t, testACL, `filter TEST-IN {
+    term WEB-PORTS {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+            protocol tcp;
+            destination-port [ http https 8080-8090 ];
+        }
+        then accept;
+    }
+    term SINGLE-PORT {
+        from {
+            destination-prefix-list {
+                DB;
+            }
+            destination-port ssh;
+        }
+        then accept;
+    }
+}
+`)
+
+	tests := []struct {
+		port string
+		term string
+		want bool
+	}{
+		{"443", "WEB-PORTS", true},
+		{"https", "WEB-PORTS", true},
+		{"80", "WEB-PORTS", true},
+		{"8085", "WEB-PORTS", true},
+		{"8080-8082", "WEB-PORTS", true},
+		{"8090-8095", "WEB-PORTS", true}, // диапазон пересекается с разрешенным
+		{"8443", "WEB-PORTS", false},
+		{"22", "WEB-PORTS", false},
+		{"22", "SINGLE-PORT", true},
+		{"20-25", "SINGLE-PORT", true},
+		{"23", "SINGLE-PORT", false},
+		{"garbage", "SINGLE-PORT", false},
+		{"70000", "SINGLE-PORT", false},
+	}
+	for _, tt := range tests {
+		rules := checkAccess(getState(), "", "10.2.2.2", tt.port)
+		if got := hasTerm(rules, tt.term); got != tt.want {
+			t.Errorf("port %q: term %s matched = %v, want %v", tt.port, tt.term, got, tt.want)
+		}
+	}
+}

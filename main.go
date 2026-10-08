@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +69,7 @@ type PolicyRule struct {
 	// Разобранные адресные условия для сопоставления
 	srcAddrs addrSet
 	dstAddrs addrSet
+	dstPorts portSet
 }
 
 // Хранит состояние приложения
@@ -666,6 +666,7 @@ func parseThenSection(line string, term *PolicyTerm) {
 func resolvePrefixLists(state *AppState) {
 	missing := make(map[string]bool)
 	invalid := make(map[string]bool)
+	invalidPorts := make(map[string]bool)
 
 	for i, rule := range state.PolicyRules {
 		resolved, addrs := resolveAddresses(state, rule.Term.SourceAddresses, rule.Term.SourcePrefixLists, missing, invalid)
@@ -675,6 +676,15 @@ func resolvePrefixLists(state *AppState) {
 		resolved, addrs = resolveAddresses(state, rule.Term.DestinationAddresses, rule.Term.DestinationPrefixLists, missing, invalid)
 		state.PolicyRules[i].ResolvedDestinationPrefixes = resolved
 		state.PolicyRules[i].dstAddrs = addrs
+
+		state.PolicyRules[i].dstPorts = newPortSet(rule.Term.DestinationPorts)
+		if state.PolicyRules[i].dstPorts.unknown {
+			for _, spec := range rule.Term.DestinationPorts {
+				if _, ok := parsePortSpec(spec); !ok {
+					invalidPorts[spec] = true
+				}
+			}
+		}
 	}
 
 	if len(missing) > 0 {
@@ -682,6 +692,9 @@ func resolvePrefixLists(state *AppState) {
 	}
 	if len(invalid) > 0 {
 		log.Printf("⚠️ Prefixes that could not be parsed (%d): %v", len(invalid), sortedKeys(invalid))
+	}
+	if len(invalidPorts) > 0 {
+		log.Printf("⚠️ Ports that could not be parsed (%d): %v", len(invalidPorts), sortedKeys(invalidPorts))
 	}
 }
 
@@ -981,27 +994,12 @@ func isRuleMatch(rule PolicyRule, src, dst, port string) bool {
 		return false
 	}
 
-	portMatch := false
-	if port == "" {
-		// Если порт не указан, считаем что совпадает
-		portMatch = true
-	} else {
-		// Проверяем порты в правиле
-		if len(rule.Term.DestinationPorts) == 0 {
-			// Если в правиле не указаны порты, значит все порты разрешены
-			portMatch = true
-		} else {
-			// Проверяем каждый порт в правиле
-			for _, rulePort := range rule.Term.DestinationPorts {
-				if portMatches(port, rulePort) {
-					portMatch = true
-					break
-				}
-			}
-		}
+	// Проверяем порт. Нераспознанный порт не подходит ни под одно правило
+	portQuery, portOK := parsePortSpec(port)
+	if port != "" && !portOK {
+		return false
 	}
-
-	return portMatch
+	return rule.dstPorts.match(portQuery, port != "") != matchNone
 }
 
 // Вспомогательные функции
@@ -1051,90 +1049,6 @@ func appendUnique(existing []string, newItems ...string) []string {
 	}
 
 	return result
-}
-
-// Проверяет совпадение портов
-func portMatches(queryPort, rulePort string) bool {
-	queryPort = strings.TrimSpace(queryPort)
-	rulePort = strings.TrimSpace(rulePort)
-
-	// Простое совпадение
-	if queryPort == rulePort {
-		return true
-	}
-
-	// Приводим к нижнему регистру для сравнения
-	queryLower := strings.ToLower(queryPort)
-	ruleLower := strings.ToLower(rulePort)
-
-	// Проверяем именованные порты (http, https, ssh и т.д.)
-	if queryLower == ruleLower {
-		return true
-	}
-
-	// Пробуем преобразовать queryPort в число
-	queryNum, queryErr := strconv.Atoi(queryPort)
-
-	// Проверяем диапазоны портов в rulePort
-	if strings.Contains(rulePort, "-") {
-		parts := strings.Split(rulePort, "-")
-		if len(parts) == 2 {
-			start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-			end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err1 == nil && err2 == nil {
-				// Если queryPort - число
-				if queryErr == nil && queryNum >= start && queryNum <= end {
-					return true
-				}
-				// Если queryPort тоже диапазон
-				if strings.Contains(queryPort, "-") {
-					qParts := strings.Split(queryPort, "-")
-					if len(qParts) == 2 {
-						qStart, qErr1 := strconv.Atoi(strings.TrimSpace(qParts[0]))
-						qEnd, qErr2 := strconv.Atoi(strings.TrimSpace(qParts[1]))
-						if qErr1 == nil && qErr2 == nil {
-							// Проверяем пересечение диапазонов
-							if qStart <= end && qEnd >= start {
-								return true
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Проверяем если queryPort - диапазон, а rulePort - одиночный порт
-	if queryErr == nil && !strings.Contains(queryPort, "-") {
-		// queryPort - число, rulePort - одиночный порт
-		ruleNum, ruleErr := strconv.Atoi(rulePort)
-		if ruleErr == nil && queryNum == ruleNum {
-			return true
-		}
-	}
-
-	// Специальные случаи
-	if rulePort == "any" || rulePort == "all" || rulePort == "*" {
-		return true
-	}
-
-	// Проверяем множественные порты (через запятую или пробел)
-	if strings.Contains(rulePort, ",") || strings.Contains(rulePort, " ") {
-		var ports []string
-		if strings.Contains(rulePort, ",") {
-			ports = strings.Split(rulePort, ",")
-		} else {
-			ports = strings.Fields(rulePort)
-		}
-		for _, p := range ports {
-			p = strings.TrimSpace(p)
-			if portMatches(queryPort, p) {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // Парсит порты из строки с диапазонами
