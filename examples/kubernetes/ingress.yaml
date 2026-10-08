@@ -1,0 +1,24 @@
+# Пример для стандартного Ingress. Аутентификации в сервисе нет:
+# доступ ограничивается здесь (внутренняя сеть, SSO, oauth2-proxy).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: junos-acl-analyzer
+  labels:
+    app.kubernetes.io/name: junos-acl-analyzer
+spec:
+  ingressClassName: <класс ingress>
+  rules:
+    - host: <acl.example.com>
+      http:
+        paths:
+          # /metrics, /healthz и /readyz тоже попадают под этот путь. Prometheus
+          # и пробы ходят в под напрямую, поэтому снаружи их можно закрыть
+          # средствами вашего ingress-контроллера
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: junos-acl-analyzer
+                port:
+                  name: http

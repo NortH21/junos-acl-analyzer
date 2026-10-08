@@ -1,0 +1,169 @@
+# Пример развертывания: сервис и git-sync, который приносит файлы фильтров.
+# Значения в угловых скобках нужно заменить своими.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junos-acl-analyzer
+  labels:
+    app.kubernetes.io/name: junos-acl-analyzer
+spec:
+  # У каждого пода своя копия фильтров, общего состояния нет
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: junos-acl-analyzer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: junos-acl-analyzer
+      annotations:
+        # Если Prometheus находит цели по аннотациям
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      # Больше 20 секунд ожидания запросов и паузы в preStop
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        # Группа git-sync: том с фильтрами доступен на запись ему и на чтение сервису
+        fsGroup: 65533
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Первый клон до старта сервиса: к моменту запуска данные уже на месте
+        - name: git-sync-init
+          image: registry.k8s.io/git-sync/git-sync:v4.4.0 # проверьте актуальную версию
+          args:
+            - --repo=https://<git-сервер>/<группа>/jcore-filters.git
+            - --ref=master
+            - --depth=1
+            - --root=/data
+            - --link=jcore-filters
+            - --username=<имя токена>
+            - --password-file=/etc/git-secret/token
+            - --one-time
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: git-secret
+              mountPath: /etc/git-secret
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      containers:
+        - name: junos-acl-analyzer
+          image: north21/junos-acl-analyzer:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FILTERS_DIR
+              value: /data/jcore-filters
+            - name: RELOAD_INTERVAL
+              value: 30s
+            # Go не знает о лимите контейнера: держим кучу ниже лимита памяти
+            - name: GOMEMLIMIT
+              value: 400MiB
+            - name: LOG_LEVEL
+              value: info
+            - name: JIRA_URL
+              value: https://<jira>/browse/
+            - name: NETBOX_URL
+              value: https://<netbox>/search/?q=
+            # Сети подов ingress: только от них принимается X-Forwarded-For
+            # - name: TRUSTED_PROXIES
+            #   value: <сеть ingress, например 10.42.0.0/16>
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Даем время убрать под из балансировки до закрытия порта
+              exec:
+                command: ["sleep", "5"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+
+        # Следит за репозиторием и атомарно переключает ссылку /data/jcore-filters
+        - name: git-sync
+          image: registry.k8s.io/git-sync/git-sync:v4.4.0 # проверьте актуальную версию
+          args:
+            - --repo=https://<git-сервер>/<группа>/jcore-filters.git
+            - --ref=master
+            - --depth=1
+            - --period=60s
+            - --root=/data
+            - --link=jcore-filters
+            - --username=<имя токена>
+            - --password-file=/etc/git-secret/token
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: git-secret
+              mountPath: /etc/git-secret
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # Рабочая копия фильтров, порядка 50 МБ
+        - name: data
+          emptyDir:
+            sizeLimit: 500Mi
+        - name: tmp
+          emptyDir: {}
+        - name: git-secret
+          secret:
+            secretName: jcore-filters-git
+            # Читает группа из fsGroup
+            defaultMode: 0440

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Пишет конфиги во временную директорию и загружает их так же, как приложение
@@ -1324,5 +1325,126 @@ func TestUnchangedFilesAreNotParsedAgain(t *testing.T) {
 	}
 	if getState() == loaded || len(getState().PolicyRules) != 1 {
 		t.Errorf("recovery after a failed reload: %d rules", len(getState().PolicyRules))
+	}
+}
+
+// Раскладывает файлы так, как это делает git-sync: каталоги версий и ссылка на текущую
+func writeRevision(t *testing.T, root, revision, conf string) {
+	t.Helper()
+	dir := filepath.Join(root, ".worktrees", revision)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "jcore1.acl.txt"), []byte(testACL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "jcore1.acl.conf.txt"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Атомарно переключает ссылку на другую версию, как git-sync
+func switchRevision(t *testing.T, root, revision string) {
+	t.Helper()
+	tmp := filepath.Join(root, "tmp-link")
+	if err := os.Symlink(filepath.Join(".worktrees", revision), tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func useFiltersDir(t *testing.T, dir string) {
+	t.Helper()
+	previous := filtersDir
+	filtersDir = dir
+	t.Cleanup(func() { filtersDir = previous })
+
+	currentState.Store(newAppState())
+	reportedProblems = make(map[string]string)
+}
+
+func TestFiltersDirFollowsSymlink(t *testing.T) {
+	const confA = "filter F {\n    term REV-A {\n        then accept;\n    }\n}\n"
+	const confB = "filter F {\n    term REV-B {\n        then accept;\n    }\n}\n"
+
+	root := t.TempDir()
+	writeRevision(t, root, "aaaa", confA)
+	writeRevision(t, root, "bbbb", confB)
+	writeRevision(t, root, "cccc", confB) // новый коммит без изменений в фильтрах
+	switchRevision(t, root, "aaaa")
+
+	// Каталог задан абсолютным путем и не зависит от рабочего каталога
+	t.Chdir(t.TempDir())
+	useFiltersDir(t, filepath.Join(root, "current"))
+
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if got := getState().PolicyRules[0].Term.Name; got != "REV-A" {
+		t.Fatalf("loaded term %q, want REV-A", got)
+	}
+
+	switchRevision(t, root, "bbbb")
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := getState()
+	if got := loaded.PolicyRules[0].Term.Name; got != "REV-B" {
+		t.Fatalf("after switch loaded term %q, want REV-B", got)
+	}
+
+	// Другой каталог версии с тем же содержимым не считается изменением
+	switchRevision(t, root, "cccc")
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if getState() != loaded {
+		t.Error("revision with the same filters was parsed again")
+	}
+
+	// Ссылка указывает в никуда: работаем на прежних данных
+	switchRevision(t, root, "missing")
+	if err := loadConfigFiles(); err == nil {
+		t.Error("dangling link must fail the reload")
+	}
+	if getState() != loaded {
+		t.Error("state was replaced after a failed reload")
+	}
+}
+
+func TestFiltersDirMissingAtStart(t *testing.T) {
+	useFiltersDir(t, filepath.Join(t.TempDir(), "not-cloned-yet"))
+
+	if err := loadConfigFiles(); err == nil {
+		t.Error("missing directory must be reported")
+	}
+	if rec := get(t, "/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz before the first clone: status %d, want 503", rec.Code)
+	}
+}
+
+func TestParseReloadInterval(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"", 2 * time.Minute, true},
+		{"30s", 30 * time.Second, true},
+		{" 5m ", 5 * time.Minute, true},
+		{"1s", time.Second, true},
+		{"500ms", 0, false},
+		{"0", 0, false},
+		{"-30s", 0, false},
+		{"30", 0, false},
+		{"soon", 0, false},
+	}
+	for _, tt := range tests {
+		got, err := parseReloadInterval(tt.in)
+		if (err == nil) != tt.ok || (tt.ok && got != tt.want) {
+			t.Errorf("parseReloadInterval(%q) = %v, %v", tt.in, got, err)
+		}
 	}
 }
