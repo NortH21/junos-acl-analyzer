@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -113,33 +115,46 @@ type CheckPageData struct {
 }
 
 var startTime time.Time
-var appState AppState
-var mu sync.Mutex
-var lastModified time.Time
+
+// Текущее состояние. Обработчики читают его без блокировок, а перезагрузка
+// собирает новое состояние отдельно и подменяет указатель целиком
+var currentState atomic.Pointer[AppState]
+
+// Не дает перезагрузкам выполняться одновременно
+var reloadMu sync.Mutex
+
+func init() {
+	currentState.Store(newAppState())
+}
+
+func newAppState() *AppState {
+	return &AppState{
+		PrefixLists: make(map[string][]string),
+		PolicyRules: []PolicyRule{},
+	}
+}
+
+// Возвращает снимок состояния, который не меняется после публикации
+func getState() *AppState {
+	return currentState.Load()
+}
 
 func main() {
 	startTime = time.Now()
 
-	// Инициализация состояния
-	appState = AppState{
-		PrefixLists: make(map[string][]string),
-		PolicyRules: []PolicyRule{},
-	}
-
 	// Парсинг файлов
-	loadConfigFiles()
+	if err := loadConfigFiles(); err != nil {
+		log.Printf("⚠️ Initial load error: %v", err)
+	}
 	// Автообновление каждые 2 минут
 	go autoReloadConfigs(2 * time.Minute)
-
-	// Разворачивание префикс-листов
-	resolvePrefixLists()
 
 	// Настройка HTTP-обработчиков
 	handler := newHandler()
 
 	log.Printf("✅ Server started on http://localhost:8080") // TODO: Вынести адрес и порт в конфиг
-	log.Println("📊 Prefix lists loaded:", len(appState.PrefixLists))
-	log.Println("📊 Policy rules loaded:", len(appState.PolicyRules))
+	log.Println("📊 Prefix lists loaded:", len(getState().PrefixLists))
+	log.Println("📊 Policy rules loaded:", len(getState().PolicyRules))
 
 	if err := http.ListenAndServe(":8080", handler); err != nil { // TODO: Вынести порт в конфиг
 		log.Printf("❌ Server startup error: %v\n", err)
@@ -204,10 +219,10 @@ func netboxLink(query string) string {
 }
 
 // Ищет правила и группирует их
-func searchRulesWithGrouping(query string) []GroupedRule {
+func searchRulesWithGrouping(state *AppState, query string) []GroupedRule {
 	groupedRules := make(map[string]*GroupedRule)
 
-	for _, rule := range appState.PolicyRules {
+	for _, rule := range state.PolicyRules {
 		if !isSearchMatch(rule, query) {
 			continue
 		}
@@ -301,24 +316,40 @@ func isSearchMatch(rule PolicyRule, query string) bool {
 	return false
 }
 
-// Загружает конфигурационные файлы
+// Загружает конфигурационные файлы и публикует новое состояние
 func loadConfigFiles() error {
-	mu.Lock()
-	defer mu.Unlock()
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
 
 	log.Println("🔄 Loading configuration files...")
 
-	// Сохраняем текущее состояние на случай ошибки
-	oldState := appState
+	oldState := getState()
+	newState, loadErr := buildState()
 
-	// Создаем новое состояние
-	newState := AppState{
-		PrefixLists: make(map[string][]string),
-		PolicyRules: []PolicyRule{},
+	log.Printf("✅ Loaded: %d prefix lists, %d rules",
+		len(newState.PrefixLists), len(newState.PolicyRules))
+
+	// Если ни один файл не загрузился, оставляем старое состояние
+	if len(newState.PrefixLists) == 0 && len(newState.PolicyRules) == 0 {
+		log.Println("⚠️ No data loaded, keeping old state")
+		return fmt.Errorf("no data loaded from any file")
 	}
 
-	// Используем новое состояние
-	appState = newState
+	// Файл мог читаться в момент обновления репозитория. Частичные данные хуже
+	// устаревших, поэтому при ошибке оставляем уже загруженное состояние
+	oldHasData := len(oldState.PrefixLists) > 0 || len(oldState.PolicyRules) > 0
+	if loadErr != nil && oldHasData {
+		log.Println("⚠️ Load finished with errors, keeping old state")
+		return loadErr
+	}
+
+	currentState.Store(newState)
+	return loadErr
+}
+
+// Собирает состояние из файлов, не трогая опубликованное
+func buildState() (*AppState, error) {
+	state := newAppState()
 
 	// Шаблоны файлов которые парсим
 	aclPatterns := []string{
@@ -350,36 +381,28 @@ func loadConfigFiles() error {
 	log.Printf("📁 Found ACL files: %v", allAclFiles)
 	log.Printf("📁 Found CONF files: %v", allConfFiles)
 
+	var errs []error
+
 	// Парсим ACL файлы
 	for _, aclFile := range allAclFiles {
-		if err := parsePrefixLists(aclFile); err != nil {
+		if err := parsePrefixLists(state, aclFile); err != nil {
 			log.Printf("⚠️ ACL file error %s: %v", aclFile, err)
+			errs = append(errs, fmt.Errorf("%s: %w", aclFile, err))
 		}
 	}
 
 	// Парсим CONF файлы
 	for _, confFile := range allConfFiles {
-		if err := parsePolicyRules(confFile); err != nil {
+		if err := parsePolicyRules(state, confFile); err != nil {
 			log.Printf("⚠️ CONF file error %s: %v", confFile, err)
+			errs = append(errs, fmt.Errorf("%s: %w", confFile, err))
 		}
 	}
 
 	// Разворачивает префикс-листы
-	resolvePrefixLists()
-	lastModified = time.Now()
+	resolvePrefixLists(state)
 
-	log.Printf("✅ Loaded: %d prefix lists, %d rules",
-		len(appState.PrefixLists), len(appState.PolicyRules))
-
-	// Если нужно восстановить старое состояние при ошибке
-	// (например, если ни один файл не загрузился)
-	if len(appState.PrefixLists) == 0 && len(appState.PolicyRules) == 0 {
-		log.Println("⚠️ No data loaded, restoring old state")
-		appState = oldState
-		return fmt.Errorf("No data loaded from any file")
-	}
-
-	return nil
+	return state, errors.Join(errs...)
 }
 
 // Удаляет дубликаты из списка файлов
@@ -412,7 +435,7 @@ func autoReloadConfigs(interval time.Duration) {
 }
 
 // Парсит файл с префикс-листами
-func parsePrefixLists(filename string) error {
+func parsePrefixLists(state *AppState, filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -437,7 +460,7 @@ func parsePrefixLists(filename string) error {
 				listName := parts[3]
 				prefix := parts[4]
 
-				appState.PrefixLists[listName] = append(appState.PrefixLists[listName], prefix)
+				state.PrefixLists[listName] = append(state.PrefixLists[listName], prefix)
 			}
 		}
 	}
@@ -446,7 +469,7 @@ func parsePrefixLists(filename string) error {
 }
 
 // Парсит файл с политиками
-func parsePolicyRules(filename string) error {
+func parsePolicyRules(state *AppState, filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -519,7 +542,7 @@ func parsePolicyRules(filename string) error {
 				} else if blockDepth > 0 {
 					// Конец term
 					if currentTerm != nil {
-						appState.PolicyRules = append(appState.PolicyRules, PolicyRule{
+						state.PolicyRules = append(state.PolicyRules, PolicyRule{
 							FilterName: currentFilter,
 							Term:       *currentTerm,
 						})
@@ -534,7 +557,7 @@ func parsePolicyRules(filename string) error {
 		// Начало term
 		if strings.HasPrefix(line, "term ") && inFilter {
 			if currentTerm != nil {
-				appState.PolicyRules = append(appState.PolicyRules, PolicyRule{
+				state.PolicyRules = append(state.PolicyRules, PolicyRule{
 					FilterName: currentFilter,
 					Term:       *currentTerm,
 				})
@@ -579,7 +602,7 @@ func parsePolicyRules(filename string) error {
 
 	// Добавляем последний term, если есть
 	if currentTerm != nil && inFilter {
-		appState.PolicyRules = append(appState.PolicyRules, PolicyRule{
+		state.PolicyRules = append(state.PolicyRules, PolicyRule{
 			FilterName: currentFilter,
 			Term:       *currentTerm,
 		})
@@ -690,10 +713,10 @@ func parseThenSection(line string, term *PolicyTerm) {
 }
 
 // Разворачивает префикс-листы в конкретные префиксы
-func resolvePrefixLists() {
+func resolvePrefixLists(state *AppState) {
 	missing := make(map[string]bool)
 
-	for i, rule := range appState.PolicyRules {
+	for i, rule := range state.PolicyRules {
 		var resolvedSourcePrefixes []string
 		var resolvedDestinationPrefixes []string
 
@@ -702,7 +725,7 @@ func resolvePrefixLists() {
 
 		// Разворачивает source префикс-листы
 		for _, listName := range rule.Term.SourcePrefixLists {
-			if prefixes, exists := appState.PrefixLists[listName]; exists {
+			if prefixes, exists := state.PrefixLists[listName]; exists {
 				resolvedSourcePrefixes = append(resolvedSourcePrefixes, prefixes...)
 			} else {
 				missing[listName] = true
@@ -714,15 +737,15 @@ func resolvePrefixLists() {
 
 		// Разворачивает destination префикс-листы
 		for _, listName := range rule.Term.DestinationPrefixLists {
-			if prefixes, exists := appState.PrefixLists[listName]; exists {
+			if prefixes, exists := state.PrefixLists[listName]; exists {
 				resolvedDestinationPrefixes = append(resolvedDestinationPrefixes, prefixes...)
 			} else {
 				missing[listName] = true
 			}
 		}
 
-		appState.PolicyRules[i].ResolvedSourcePrefixes = resolvedSourcePrefixes
-		appState.PolicyRules[i].ResolvedDestinationPrefixes = resolvedDestinationPrefixes
+		state.PolicyRules[i].ResolvedSourcePrefixes = resolvedSourcePrefixes
+		state.PolicyRules[i].ResolvedDestinationPrefixes = resolvedDestinationPrefixes
 	}
 
 	if len(missing) > 0 {
@@ -765,13 +788,15 @@ func matchesCIDR(query, cidr string) bool {
 
 // Обработчики HTTP
 func homeHandler(w http.ResponseWriter, r *http.Request) {
+	state := getState()
+
 	data := struct {
 		Stats       AppStats
 		SampleRules []PolicyRule
 	}{
 		Stats: AppStats{
-			PrefixListCount: len(appState.PrefixLists),
-			RuleCount:       len(appState.PolicyRules),
+			PrefixListCount: len(state.PrefixLists),
+			RuleCount:       len(state.PolicyRules),
 			MemoryUsage:     getMemoryUsage(),
 			Goroutines:      runtime.NumGoroutine(),
 			Uptime:          getUptime(),
@@ -779,10 +804,10 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Берем последние 3 правила для примера
-	if len(appState.PolicyRules) > 3 {
-		data.SampleRules = appState.PolicyRules[len(appState.PolicyRules)-3:]
+	if len(state.PolicyRules) > 3 {
+		data.SampleRules = state.PolicyRules[len(state.PolicyRules)-3:]
 	} else {
-		data.SampleRules = appState.PolicyRules
+		data.SampleRules = state.PolicyRules
 	}
 
 	renderTemplate(w, "index.html", data)
@@ -796,7 +821,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := searchRulesWithGrouping(query)
+	results := searchRulesWithGrouping(getState(), query)
 
 	data := struct {
 		Query        string
@@ -838,6 +863,7 @@ func getUptime() string {
 
 // Обработчик API для информации о памяти и статистике
 func apiMemoryHandler(w http.ResponseWriter, r *http.Request) {
+	state := getState()
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
@@ -860,8 +886,8 @@ func apiMemoryHandler(w http.ResponseWriter, r *http.Request) {
 		float64(m.Sys)/1024/1024,
 		runtime.NumGoroutine(),
 		time.Since(startTime).String(),
-		len(appState.PrefixLists),
-		len(appState.PolicyRules))
+		len(state.PrefixLists),
+		len(state.PolicyRules))
 }
 
 // checkHandler обрабатывает проверку доступа
@@ -870,12 +896,13 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	dst := r.URL.Query().Get("dst")
 	port := r.URL.Query().Get("port")
 	filter := r.URL.Query().Get("filter")
+	state := getState()
 
 	data := CheckPageData{
 		Src:        src,
 		Dst:        dst,
 		Port:       port,
-		AllFilters: getAllFilterNames(),
+		AllFilters: getAllFilterNames(state),
 	}
 
 	// Если все поля пустые, просто показываем форму
@@ -885,7 +912,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ищем правила
-	rules := checkAccess(src, dst, port)
+	rules := checkAccess(state, src, dst, port)
 
 	// Фильтруем по выбранному фильтру, если указан
 	if filter != "" {
@@ -913,10 +940,10 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Проверяет доступ по всем параметрам и возвращает сгруппированные правила
-func checkAccess(src, dst, port string) []GroupedRule {
+func checkAccess(state *AppState, src, dst, port string) []GroupedRule {
 	groupedRules := make(map[string]*GroupedRule)
 
-	for _, rule := range appState.PolicyRules {
+	for _, rule := range state.PolicyRules {
 		// Проверяем совпадение правила с запросом
 		if !isRuleMatch(rule, src, dst, port) {
 			continue
@@ -1209,10 +1236,10 @@ func parsePortRange(portStr string) []string {
 	return result
 }
 
-func getAllFilterNames() []string {
+func getAllFilterNames(state *AppState) []string {
 	filterMap := make(map[string]bool)
 
-	for _, rule := range appState.PolicyRules {
+	for _, rule := range state.PolicyRules {
 		filterMap[rule.FilterName] = true
 	}
 

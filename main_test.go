@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -26,7 +28,7 @@ func loadTestConfig(t *testing.T, acl, conf string) {
 	}
 
 	t.Chdir(dir)
-	appState = AppState{PrefixLists: make(map[string][]string)}
+	currentState.Store(newAppState())
 	if err := loadConfigFiles(); err != nil {
 		t.Fatalf("loadConfigFiles: %v", err)
 	}
@@ -35,7 +37,7 @@ func loadTestConfig(t *testing.T, acl, conf string) {
 // Возвращает action терма по имени
 func termAction(t *testing.T, name string) string {
 	t.Helper()
-	for _, rule := range appState.PolicyRules {
+	for _, rule := range getState().PolicyRules {
 		if rule.Term.Name == name {
 			return rule.Term.Action
 		}
@@ -112,8 +114,8 @@ func TestParseThenActions(t *testing.T) {
 		"T-NEXT":           "next",
 		"T-COUNT-ONLY":     "accept", // в Junos терм без терминирующего действия принимает пакет
 	}
-	if len(appState.PolicyRules) != len(want) {
-		t.Fatalf("parsed %d terms, want %d", len(appState.PolicyRules), len(want))
+	if len(getState().PolicyRules) != len(want) {
+		t.Fatalf("parsed %d terms, want %d", len(getState().PolicyRules), len(want))
 	}
 	for name, action := range want {
 		if got := termAction(t, name); got != action {
@@ -137,7 +139,7 @@ func TestDiscardTermDoesNotGrantAccess(t *testing.T) {
 }
 `)
 
-	if rules := checkAccess("10.1.1.5", "", ""); len(rules) != 0 {
+	if rules := checkAccess(getState(), "10.1.1.5", "", ""); len(rules) != 0 {
 		t.Errorf("discard term reported as allowing access: %+v", rules)
 	}
 }
@@ -177,7 +179,7 @@ func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
 }
 `)
 
-	rules := checkAccess("8.8.8.8", "10.2.2.2", "")
+	rules := checkAccess(getState(), "8.8.8.8", "10.2.2.2", "")
 	if hasTerm(rules, "MISSING-SRC") {
 		t.Error("term with undefined source prefix-list matched an arbitrary source")
 	}
@@ -185,7 +187,7 @@ func TestUnresolvedPrefixListMatchesNothing(t *testing.T) {
 		t.Error("term without source conditions must match any source")
 	}
 
-	if rules := checkAccess("10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
+	if rules := checkAccess(getState(), "10.1.1.5", "8.8.8.8", ""); hasTerm(rules, "MISSING-DST") {
 		t.Error("term with undefined destination prefix-list matched an arbitrary destination")
 	}
 }
@@ -309,5 +311,81 @@ func TestPagesRender(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), marker) {
 			t.Errorf("%s: %q not found in response", target, marker)
 		}
+	}
+}
+
+func TestReloadIsAtomic(t *testing.T) {
+	var acl, conf strings.Builder
+	conf.WriteString("filter F {\n")
+	const terms = 500
+	for i := 0; i < terms; i++ {
+		fmt.Fprintf(&acl, "set policy-options prefix-list L%d 10.%d.%d.0/24\n", i, i/250, i%250)
+		fmt.Fprintf(&conf, "term T%d {\nfrom {\nsource-prefix-list {\nL%d;\n}\n}\nthen {\naccept;\n}\n}\n", i, i)
+	}
+	conf.WriteString("}\n")
+	loadTestConfig(t, acl.String(), conf.String())
+
+	// Запускать с -race: читатели не должны видеть пустое или частичное состояние
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			if err := loadConfigFiles(); err != nil {
+				t.Errorf("reload: %v", err)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			wg.Wait()
+			return
+		default:
+		}
+
+		state := getState()
+		if got := len(state.PolicyRules); got != terms {
+			t.Fatalf("reader saw %d rules during reload, want %d", got, terms)
+		}
+		// Все термы ограничены по source, поэтому посторонний адрес не должен подойти
+		if rules := checkAccess(state, "8.8.8.8", "", ""); len(rules) != 0 {
+			t.Fatalf("reader saw %d unresolved rules during reload", len(rules))
+		}
+		if rules := checkAccess(state, "10.0.7.9", "", ""); len(rules) != 1 {
+			t.Fatalf("reader saw %d matching rules during reload, want 1", len(rules))
+		}
+	}
+}
+
+func TestFailedReloadKeepsOldState(t *testing.T) {
+	loadTestConfig(t, testACL, "filter F {\n    term T1 {\n        then accept;\n    }\n}\n")
+
+	// Каталог с файлами исчез (например, репозиторий переключают)
+	if err := os.RemoveAll("jcore-filters"); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err == nil {
+		t.Error("reload without files must return an error")
+	}
+	if got := len(getState().PolicyRules); got != 1 {
+		t.Errorf("old state lost after failed reload: %d rules", got)
+	}
+
+	// Файл правил не читается, а префикс-листы на месте
+	if err := os.MkdirAll(filepath.Join("jcore-filters", "jcore1.acl.conf.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("jcore-filters", "jcore1.acl.txt"), []byte(testACL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err == nil {
+		t.Error("reload with an unreadable file must return an error")
+	}
+	if got := len(getState().PolicyRules); got != 1 {
+		t.Errorf("partial state published after failed reload: %d rules", got)
 	}
 }
