@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -305,9 +306,10 @@ func TestSecurityHeaders(t *testing.T) {
 
 	headers := get(t, "/").Header()
 	want := map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":        "DENY",
-		"Referrer-Policy":        "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Referrer-Policy":         "no-referrer",
+		"Content-Security-Policy": contentSecurityPolicy,
 	}
 	for name, value := range want {
 		if got := headers.Get(name); got != value {
@@ -1075,5 +1077,56 @@ func TestCheckPagePartialAccess(t *testing.T) {
 	}
 	if body := get(t, "/check?src=10.1.1.5&dst=10.2.2.2&port=443").Body.String(); !strings.Contains(body, "ACCESS OPEN") {
 		t.Error("https must be open")
+	}
+}
+
+func TestStaticFiles(t *testing.T) {
+	files := map[string]string{
+		"/static/snow-init.js":                   "text/javascript",
+		"/static/check.js":                       "text/javascript",
+		"/static/vendor/snowflakes/Snow.min.js":  "text/javascript",
+		"/static/vendor/snowflakes/snow.min.css": "text/css",
+	}
+	for target, contentType := range files {
+		rec := get(t, target)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d", target, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, contentType) {
+			t.Errorf("%s: Content-Type %q, want %s", target, got, contentType)
+		}
+	}
+
+	for _, target := range []string{"/static/", "/static/vendor/", "/static/nope.js", "/static/../main.go"} {
+		if rec := get(t, target); rec.Code == http.StatusOK {
+			t.Errorf("%s: must not be served", target)
+		}
+	}
+}
+
+// CSP разрешает скрипты только из своих файлов, поэтому в страницах не должно быть
+// ни inline-скриптов, ни обработчиков в атрибутах, ни сторонних ресурсов
+func TestPagesFollowCSP(t *testing.T) {
+	loadTestConfig(t, testACL, orderTestConf)
+
+	scriptTag := regexp.MustCompile(`(?i)<script\b[^>]*>`)
+	scriptSrc := regexp.MustCompile(`(?i)\bsrc="/static/[^"]+"`)
+	inlineHandler := regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
+	resource := regexp.MustCompile(`(?i)<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)="(?:https?:)?//`)
+
+	for _, target := range []string{"/", "/search?q=WEB", "/search?q=nothing", "/check", "/check?src=10.1.1.5&dst=10.2.2.2"} {
+		body := get(t, target).Body.String()
+
+		for _, tag := range scriptTag.FindAllString(body, -1) {
+			if !scriptSrc.MatchString(tag) {
+				t.Errorf("%s: script not loaded from /static/: %s", target, tag)
+			}
+		}
+		if inlineHandler.MatchString(body) {
+			t.Errorf("%s: inline event handler found", target)
+		}
+		if match := resource.FindString(body); match != "" {
+			t.Errorf("%s: third-party resource: %s", target, match)
+		}
 	}
 }

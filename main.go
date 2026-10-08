@@ -23,6 +23,11 @@ import (
 //go:embed templates/*.html
 var templatesFS embed.FS
 
+// Скрипты и стили отдаем сами, без сторонних CDN
+//
+//go:embed static
+var staticFS embed.FS
+
 // html/template экранирует пользовательский ввод с учетом контекста (HTML, атрибуты, URL)
 var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	"add": func(a, b int) int { return a + b },
@@ -182,8 +187,29 @@ func newHandler() http.Handler {
 	mux.HandleFunc("/search", searchHandler)
 	mux.HandleFunc("/check", checkHandler)
 	mux.HandleFunc("/api/memory", apiMemoryHandler)
+	mux.Handle("/static/", staticHandler())
 
 	return securityHeaders(mux)
+}
+
+// Стили пока встроены в шаблоны, поэтому для них разрешен inline.
+// data: нужен для стрелки выпадающего списка
+const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// Отдает встроенные статические файлы
+func staticHandler() http.Handler {
+	files := http.FileServerFS(staticFS)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Списки каталогов не показываем
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		files.ServeHTTP(w, r)
+	})
 }
 
 // Добавляет защитные заголовки ко всем ответам
@@ -194,6 +220,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		// В строке запроса внутренние адреса, не отдаем их сторонним хостам
 		h.Set("Referrer-Policy", "no-referrer")
+		// Скрипты только свои и только из файлов: даже пропущенный в разметку
+		// пользовательский ввод не выполнится
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		next.ServeHTTP(w, r)
 	})
 }
