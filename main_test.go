@@ -376,8 +376,18 @@ func TestReloadIsAtomic(t *testing.T) {
 		defer wg.Done()
 		defer close(done)
 		for i := 0; i < 20; i++ {
+			// Неизмененные файлы повторно не разбираются, поэтому меняем их
+			// так, чтобы данные остались прежними
+			content := fmt.Sprintf("%s# revision %d\n", acl.String(), i)
+			if err := os.WriteFile(filepath.Join("jcore-filters", "jcore1.acl.txt"), []byte(content), 0o644); err != nil {
+				t.Errorf("rewrite: %v", err)
+			}
+			before := getState()
 			if err := loadConfigFiles(); err != nil {
 				t.Errorf("reload: %v", err)
+			}
+			if getState() == before {
+				t.Error("changed files were not reloaded")
 			}
 		}
 	}()
@@ -1237,5 +1247,82 @@ func TestPagesUseSharedAssets(t *testing.T) {
 	// Шаблоны наружу не отдаются
 	if rec := get(t, "/templates/index.html"); rec.Code != http.StatusNotFound {
 		t.Errorf("/templates/index.html: status %d, want 404", rec.Code)
+	}
+}
+
+func TestUnchangedFilesAreNotParsedAgain(t *testing.T) {
+	const conf = "filter F {\n    term T1 {\n        then accept;\n    }\n}\n"
+	loadTestConfig(t, testACL, conf)
+	confPath := filepath.Join("jcore-filters", "jcore1.acl.conf.txt")
+
+	// То же содержимое: состояние остается тем же объектом
+	loaded := getState()
+	for i := 0; i < 3; i++ {
+		if err := loadConfigFiles(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if getState() != loaded {
+		t.Error("unchanged files were parsed again")
+	}
+
+	// Перезапись тем же содержимым (так делает git checkout) тоже не изменение
+	if err := os.WriteFile(confPath, []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if getState() != loaded {
+		t.Error("files rewritten with the same content were parsed again")
+	}
+
+	// Изменение содержимого
+	changed := strings.Replace(conf, "term T1", "term T2", 1)
+	if err := os.WriteFile(confPath, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if getState() == loaded || getState().PolicyRules[0].Term.Name != "T2" {
+		t.Error("changed content was not loaded")
+	}
+
+	// Новый файл с тем же набором строк в другом месте - тоже изменение
+	loaded = getState()
+	extra := filepath.Join("jcore-filters", "jcore2.acl.conf.txt")
+	if err := os.WriteFile(extra, []byte("filter G {\n    term T3 {\n        then accept;\n    }\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if getState() == loaded || len(getState().PolicyRules) != 2 {
+		t.Errorf("new file was not loaded: %d rules", len(getState().PolicyRules))
+	}
+
+	// После сбоя данные остаются прежними, а следующая удачная попытка их обновляет
+	loaded = getState()
+	if err := os.Remove(extra); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err == nil {
+		t.Error("unreadable file must fail the reload")
+	}
+	if getState() != loaded {
+		t.Error("failed reload replaced the state")
+	}
+	if err := os.Remove(extra); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if getState() == loaded || len(getState().PolicyRules) != 1 {
+		t.Errorf("recovery after a failed reload: %d rules", len(getState().PolicyRules))
 	}
 }

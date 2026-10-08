@@ -378,7 +378,24 @@ func loadConfigFiles() error {
 	start := time.Now()
 
 	oldState := getState()
-	newState, loadErr := buildState(log)
+	aclFiles, confFiles := findFilterFiles()
+
+	// Перезагрузка раз в две минуты обычно ничего не меняет. Сначала сравниваем
+	// хеш файлов: разбор заново строит все состояние в памяти, и делать это
+	// ради тех же данных незачем. На уровне info пишем только реальные изменения
+	fingerprint, hashErr := fingerprintFiles(aclFiles, confFiles)
+	if hashErr == nil && fingerprint == oldState.fingerprint {
+		log.Debug("filters unchanged",
+			"files", len(aclFiles)+len(confFiles),
+			"duration_ms", time.Since(start).Milliseconds())
+		return nil
+	}
+
+	newState, loadErr := buildState(log, aclFiles, confFiles)
+	// После ошибки хеш не запоминаем, чтобы следующая перезагрузка разобрала файлы снова
+	if hashErr == nil && loadErr == nil {
+		newState.fingerprint = fingerprint
+	}
 	oldHasData := len(oldState.PrefixLists) > 0 || len(oldState.PolicyRules) > 0
 
 	// Если ни один файл не загрузился, оставляем старое состояние
@@ -401,13 +418,6 @@ func loadConfigFiles() error {
 	}
 
 	duration := time.Since(start).Milliseconds()
-
-	// Перезагрузка раз в две минуты обычно ничего не меняет. Чтобы не засорять
-	// лог одинаковыми строками, на уровне info пишем только реальные изменения
-	if loadErr == nil && newState.fingerprint == oldState.fingerprint {
-		log.Debug("filters unchanged", "files", newState.files, "duration_ms", duration)
-		return nil
-	}
 
 	currentState.Store(newState)
 
@@ -471,10 +481,8 @@ func reportProblems(log *slog.Logger, problems loadProblems) {
 	}
 }
 
-// Собирает состояние из файлов, не трогая опубликованное
-func buildState(log *slog.Logger) (*AppState, error) {
-	state := newAppState()
-
+// Находит файлы с префикс-листами и с фильтрами
+func findFilterFiles() (aclFiles, confFiles []string) {
 	// Шаблоны файлов которые парсим
 	aclPatterns := []string{
 		"./jcore-filters/jcore*.acl.txt",
@@ -484,23 +492,47 @@ func buildState(log *slog.Logger) (*AppState, error) {
 		"./jcore-filters/jcore*.acl.conf.txt",
 	}
 
-	// Собираем все файлы
-	var allAclFiles []string
-	var allConfFiles []string
-
 	for _, pattern := range aclPatterns {
 		files, _ := filepath.Glob(pattern)
-		allAclFiles = append(allAclFiles, files...)
+		aclFiles = append(aclFiles, files...)
 	}
 
 	for _, pattern := range confPatterns {
 		files, _ := filepath.Glob(pattern)
-		allConfFiles = append(allConfFiles, files...)
+		confFiles = append(confFiles, files...)
 	}
 
 	// Убираем дубликаты
-	allAclFiles = uniqueFiles(allAclFiles)
-	allConfFiles = uniqueFiles(allConfFiles)
+	return uniqueFiles(aclFiles), uniqueFiles(confFiles)
+}
+
+// Считает хеш имен и содержимого файлов. Файлы читаются потоком, без загрузки в память
+func fingerprintFiles(fileLists ...[]string) (string, error) {
+	hash := sha256.New()
+
+	for _, files := range fileLists {
+		for _, name := range files {
+			io.WriteString(hash, name+"\n")
+
+			file, err := os.Open(name)
+			if err != nil {
+				return "", err
+			}
+			_, err = io.Copy(hash, file)
+			file.Close()
+			if err != nil {
+				return "", err
+			}
+			io.WriteString(hash, "\n")
+		}
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// Собирает состояние из файлов, не трогая опубликованное
+func buildState(log *slog.Logger, allAclFiles, allConfFiles []string) (*AppState, error) {
+	state := newAppState()
 	state.files = len(allAclFiles) + len(allConfFiles)
 
 	log.Debug("filter files found",
@@ -508,12 +540,10 @@ func buildState(log *slog.Logger) (*AppState, error) {
 		"conf_files", len(allConfFiles))
 
 	var errs []error
-	hash := sha256.New()
 
 	// Парсим ACL файлы
 	for _, aclFile := range allAclFiles {
-		io.WriteString(hash, aclFile+"\n")
-		if err := parsePrefixLists(state, aclFile, hash); err != nil {
+		if err := parsePrefixLists(state, aclFile); err != nil {
 			log.Warn("cannot read prefix list file "+filepath.Base(aclFile), "filter_file", aclFile, "error", err.Error())
 			errs = append(errs, fmt.Errorf("%s: %w", aclFile, err))
 		}
@@ -521,14 +551,11 @@ func buildState(log *slog.Logger) (*AppState, error) {
 
 	// Парсим CONF файлы
 	for _, confFile := range allConfFiles {
-		io.WriteString(hash, confFile+"\n")
-		if err := parsePolicyRules(state, confFile, hash); err != nil {
+		if err := parsePolicyRules(state, confFile); err != nil {
 			log.Warn("cannot read filter file "+filepath.Base(confFile), "filter_file", confFile, "error", err.Error())
 			errs = append(errs, fmt.Errorf("%s: %w", confFile, err))
 		}
 	}
-
-	state.fingerprint = hex.EncodeToString(hash.Sum(nil))
 
 	// Разворачивает префикс-листы
 	resolvePrefixLists(state)
@@ -583,15 +610,14 @@ func reloadSafely() {
 }
 
 // Парсит файл с префикс-листами
-func parsePrefixLists(state *AppState, filename string, hash io.Writer) error {
+func parsePrefixLists(state *AppState, filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Содержимое попутно попадает в хеш состояния
-	scanner := bufio.NewScanner(io.TeeReader(file, hash))
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	for scanner.Scan() {
@@ -621,15 +647,14 @@ func parsePrefixLists(state *AppState, filename string, hash io.Writer) error {
 
 // Парсит файл с политиками.
 // Вложенность отслеживается стеком блоков: filter -> term -> from/then -> блок условий
-func parsePolicyRules(state *AppState, filename string, hash io.Writer) error {
+func parsePolicyRules(state *AppState, filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Содержимое попутно попадает в хеш состояния
-	scanner := bufio.NewScanner(io.TeeReader(file, hash))
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	var stack []string
 	var currentFilter string
