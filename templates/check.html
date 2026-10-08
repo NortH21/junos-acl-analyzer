@@ -358,11 +358,22 @@
                 port: document.getElementById('port').value,
                 filter: document.getElementById('filter').value
             };
-            localStorage.setItem('checkFormState', JSON.stringify(formData));
+            try {
+                localStorage.setItem('checkFormState', JSON.stringify(formData));
+            } catch(e) {
+                console.log('Error saving form state:', e);
+            }
         }
         
         // Восстанавливаем состояние формы
         function restoreFormState() {
+            // Если параметры пришли в адресе, форму уже заполнил сервер.
+            // Сохраненные значения не должны подменять запрос, по которому показан результат
+            if (window.location.search.length > 1) {
+                saveFormState();
+                return;
+            }
+
             try {
                 const saved = localStorage.getItem('checkFormState');
                 if (saved) {
